@@ -1,0 +1,5 @@
+regexp2cg
+example/*
+example_old/*
+test/*
+.DS_Store
