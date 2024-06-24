@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 
 	"fmt"
@@ -110,6 +111,10 @@ type regexpData struct {
 	//TODO: string vs rune vs byte?
 }
 
+func (rm *regexpData) addLocalDec(dec string) {
+	rm.additionalDeclarations = append(rm.additionalDeclarations, dec)
+}
+
 func (c *converter) addRegexp(sourceLocation, name string, txt string, opt syntax.RegexOptions) error {
 	// parse it
 	tree, err := syntax.Parse(txt, opt|syntax.Compiled)
@@ -117,7 +122,7 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 		return errors.Wrap(err, "error parsing regexp")
 	}
 
-	//log.Println(tree.Dump())
+	fmt.Printf("/*\n%s\n*/\n", tree.Dump())
 
 	if err := supportsCodeGen(tree); err != nil {
 		return errors.Wrap(err, "code generation not supported")
@@ -214,6 +219,22 @@ func getRuneSliceLiteral[T []rune | string](in T) string {
 	return fmt.Sprintf("[]rune(%#v)", string(in))
 }
 
+func getRuneLiteralParams(in []rune) string {
+	if len(in) == 0 {
+		return ""
+	}
+
+	buf := &bytes.Buffer{}
+	sep := "'"
+	for _, ch := range in {
+		buf.WriteString(sep)
+		buf.WriteRune(ch)
+		sep = "', '"
+	}
+	buf.WriteRune('\'')
+	return buf.String()
+}
+
 // Determines whether its ok to embed the string in the field name.
 func isValidInFieldName(str string) bool {
 	for _, c := range str {
@@ -257,6 +278,33 @@ func isAscii(chars []rune) bool {
 	}
 	return true
 }
+func (c *converter) emitIndexOfChars(chars []rune, negate bool, spanName string) string {
+	// We have a chars array, so we can use IndexOf{Any}{Except} to search for it. Choose the best overload.
+	// 1, 2, 3 have dedicated optimized IndexOfAny overloads
+	// 4, 5 have dedicated optimized IndexOfAny overloads accessible via the ReadOnlySpan<char> overload,
+	// but can also be handled via SearchValues
+	// > 5 can only be handled efficiently via SearchValues
+	var indexOfAnyName = "IndexOfAny"
+	if negate {
+		indexOfAnyName = "IndexOfAnyExcept"
+	}
+
+	switch len(chars) {
+	case 1:
+		return fmt.Sprintf("helpers.%s1(%s, %q)", indexOfAnyName, spanName, chars[0])
+	case 2:
+		return fmt.Sprintf("helpers.%s2(%s, %q, %q)", indexOfAnyName, spanName, chars[0], chars[1])
+	case 3:
+		return fmt.Sprintf("helpers.%s3(%s, %q, %q, %q)", indexOfAnyName, spanName, chars[0], chars[1], chars[2])
+	case 4, 5:
+		if shouldUseSearchValues(chars) {
+			return fmt.Sprintf("%s.%s(%s)", c.emitSearchValues(chars, ""), indexOfAnyName, spanName)
+		} else {
+			return fmt.Sprintf("helpers.%s(%s, %s)", indexOfAnyName, spanName, getRuneSliceLiteral(chars))
+		}
+	}
+	return fmt.Sprintf("%s.%s(%s)", c.emitSearchValues(chars, ""), indexOfAnyName, spanName)
+}
 
 var emitSearchValueConstNames = map[string]string{
 	"FFFFFFFF000000000000000000000080": "svAsciiControl",
@@ -287,8 +335,9 @@ var emitSearchValueConstNames = map[string]string{
 
 func (c *converter) emitSearchValues(chars []rune, fieldName string) string {
 	slices.Sort(chars)
+	asciiOnly := isAscii(chars)
 	if len(fieldName) == 0 {
-		if isAscii(chars) {
+		if asciiOnly {
 			// The set of ASCII characters can be represented as a 128-bit bitmap. Use the 16-byte hex string as the key.
 			bitmap := make([]byte, 16)
 			for _, c := range chars {
@@ -306,9 +355,15 @@ func (c *converter) emitSearchValues(chars []rune, fieldName string) string {
 	}
 
 	if _, ok := c.requiredHelpers[fieldName]; !ok {
-		c.requiredHelpers[fieldName] = fmt.Sprintf(`// Supports searching for the chars in or not in %#v
-		var %v = regexp2.NewRuneSearchValues(%s, false)`,
-			string(chars), fieldName, getRuneSliceLiteral(chars))
+		if asciiOnly {
+			c.requiredHelpers[fieldName] = fmt.Sprintf(`// Supports searching for the chars in or not in %#v
+			var %v = helpers.NewAsciiSearchValues(%#v)`,
+				string(chars), fieldName, string(chars))
+		} else {
+			c.requiredHelpers[fieldName] = fmt.Sprintf(`// Supports searching for the chars in or not in %#v
+			var %v = helpers.NewRuneSearchValues(%#v)`,
+				string(chars), fieldName, string(chars))
+		}
 	}
 
 	return fieldName

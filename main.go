@@ -31,8 +31,6 @@ func main() {
 	}
 	txt := *expr
 
-	log.Printf("Converting regexp: %v With Options: %v", txt, options)
-
 	c, err := newConverter(os.Stdout)
 	if err != nil {
 		log.Fatal(errors.Wrap(err, "code generation error"))

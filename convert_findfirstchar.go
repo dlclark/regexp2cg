@@ -37,7 +37,7 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 		c.out = oldOut
 
 		if needPosVar {
-			c.writeLine("pos := base.Runtextpos")
+			c.writeLine("pos := r.Runtextpos")
 		}
 
 		// write additionalDeclarations
@@ -150,7 +150,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// we're at a possible match location.  Otherwise, because we've already moved
 		// beyond it, we'll never be, so fail immediately.
 		c.writeLine(`
-			if (pos == base.runtextstart) {
+			if (pos == r.Runtextstart) {
 				return true
 			}
 		`)
@@ -161,7 +161,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// since nothing until then can possibly match.
 		c.writeLine(`// The pattern leads with an end (\Z) anchor.
 		if pos < r.Runtextend - 1 {
-			base.Runtextpos = r.Runtextend - 1
+			r.Runtextpos = r.Runtextend - 1
 		}
 		return true
 		`)
@@ -173,7 +173,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// since nothing until then can possibly match.
 		c.writeLine(`// The pattern leads with an end (\z) anchor.
 		if pos < r.Runtextend {
-			base.Runtextpos = r.Runtextend
+			r.Runtextpos = r.Runtextend
 		}
 		return true
 		`)
@@ -183,7 +183,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	case syntax.LeadingAnchor_RightToLeft_Beginning:
 		c.writeLine(`// The pattern leads with a beginning (\A) anchor when processed right to left.
 		if pos != 0 {
-			base.Runtextpos = 0
+			r.Runtextpos = 0
 		}
 		return true
 		`)
@@ -468,7 +468,7 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 			if len(desc) > 0 {
 				desc = "rsvSet" + desc
 			}
-			indexOf = fmt.Sprintf("%v.%v(%v, 0)", c.emitSearchValues(setChars, desc), fName, span)
+			indexOf = fmt.Sprintf("%v.%v(%v)", c.emitSearchValues(setChars, desc), fName, span)
 		} else {
 			// We have an arbitrary set of characters that's really large or otherwise not enumerable.
 			// We use a custom IndexOfAny helper that will perform the search as efficiently as possible.
@@ -506,81 +506,54 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 
 					}
 				}
-			} else {
-				c.writeLineFmt(`i := %v
+			}
+		} else {
+			c.writeLineFmt(`i := %v
 						if i >= 0 {
 							r.Runtextpos = pos+1
 							return true
 						}
 						`, indexOf)
-			}
-
-			setIndex = 1
 		}
 
-		if needLoop {
-			endBlock2 := ""
-			if setIndex < setsToUse {
-				// if (CharInClass(textSpan[i + charClassIndex], prefix[0], "...") &&
-				//     ...)
+		setIndex = 1
+	}
 
-				start := setIndex
-				for ; setIndex < setsToUse; setIndex++ {
-					addOn := ""
-					if sets[setIndex].Distance > 0 {
-						addOn = fmt.Sprintf(" + %v", sets[setIndex].Distance)
-					}
-					spanIndex := fmt.Sprintf("span[i%v]", addOn)
-					charInClassExpr := c.emitMatchCharacterClass(rm, sets[setIndex].Set, false, spanIndex)
+	if needLoop {
+		endBlock2 := ""
+		if setIndex < setsToUse {
+			// if (CharInClass(textSpan[i + charClassIndex], prefix[0], "...") &&
+			//     ...)
 
-					if setIndex == start {
-						c.write("if ")
-						c.write(charInClassExpr)
-					} else {
-						c.writeLine(" &&")
-						c.write("    ")
-						c.write(charInClassExpr)
-					}
-
+			start := setIndex
+			for ; setIndex < setsToUse; setIndex++ {
+				addOn := ""
+				if sets[setIndex].Distance > 0 {
+					addOn = fmt.Sprintf(" + %v", sets[setIndex].Distance)
 				}
-				c.writeLine(` {`)
-				endBlock2 = "}"
+				spanIndex := fmt.Sprintf("span[i%v]", addOn)
+				charInClassExpr := c.emitMatchCharacterClass(rm, sets[setIndex].Set, false, spanIndex)
+
+				if setIndex == start {
+					c.write("if ")
+					c.write(charInClassExpr)
+				} else {
+					c.writeLine(" &&")
+					c.write("    ")
+					c.write(charInClassExpr)
+				}
+
 			}
-			c.writeLine(`r.Runtextpos = pos+i
+			c.writeLine(` {`)
+			endBlock2 = "}"
+		}
+		c.writeLine(`r.Runtextpos = pos+i
 						return true`)
-			c.writeLine(endBlock2)
-		}
-
-		c.writeLine(endBlock)
-	}
-}
-
-func (c *converter) emitIndexOfChars(chars []rune, negate bool, spanName string) string {
-	// We have a chars array, so we can use IndexOf{Any}{Except} to search for it. Choose the best overload.
-	// 1, 2, 3 have dedicated optimized IndexOfAny overloads
-	// 4, 5 have dedicated optimized IndexOfAny overloads accessible via the ReadOnlySpan<char> overload,
-	// but can also be handled via SearchValues
-	// > 5 can only be handled efficiently via SearchValues
-	var indexOfAnyName = "IndexOfAny"
-	if negate {
-		indexOfAnyName = "IndexOfAnyExcept"
+		c.writeLine(endBlock2)
 	}
 
-	switch len(chars) {
-	case 1:
-		return fmt.Sprintf("helpers.%v1(%v, %q)", indexOfAnyName, spanName, chars[0])
-	case 2:
-		return fmt.Sprintf("helpers.%v2(%v, %q, %q)", indexOfAnyName, spanName, chars[0], chars[1])
-	case 3:
-		return fmt.Sprintf("helpers.%v3(%v, %q, %q, %q)", indexOfAnyName, spanName, chars[0], chars[1], chars[2])
-	case 4, 5:
-		if shouldUseSearchValues(chars) {
-			return fmt.Sprintf("%v.%v(%v, 0)", c.emitSearchValues(chars, ""), indexOfAnyName, spanName)
-		} else {
-			return fmt.Sprintf("helpers.%v(%v, %#v)", indexOfAnyName, spanName, getRuneSliceLiteral(chars))
-		}
-	}
-	return fmt.Sprintf("%v.%v(%v, 0)", c.emitSearchValues(chars, ""), indexOfAnyName, spanName)
+	c.writeLine(endBlock)
+
 }
 
 // Emits a right-to-left search for a set at a fixed position from the start of the pattern.

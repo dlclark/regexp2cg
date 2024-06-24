@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/dlclark/regexp2/syntax"
 )
@@ -118,7 +119,7 @@ func (c *converter) emitExecute(rm *regexpData) {
 
 	// Declare some locals.
 	rm.sliceSpan = "slice"
-	c.writeLine(`pos := base.runtextpos
+	c.writeLine(`pos := r.Runtextpos
 			matchStart := pos
 			`)
 
@@ -230,7 +231,7 @@ func (c *converter) emitExecuteNode(rm *regexpData, node *syntax.RegexNode, subs
 		return
 
 	case syntax.NtMulti:
-		if (node.Options & syntax.RightToLeft) == 0 {
+		if node.Options&syntax.RightToLeft == 0 {
 			c.emitExecuteMultiCharString(rm, node.Str, emitLengthChecksIfRequired, false, node.Options&syntax.RightToLeft != 0)
 			return
 		}
@@ -326,12 +327,12 @@ func (c *converter) emitExecuteAtomic(rm *regexpData, node *syntax.RegexNode, su
 	rm.doneLabel = originalDoneLabel
 }
 
-// Emits the code to handle updating base.runtextpos to pos in response to
+// Emits the code to handle updating r.Runtextpos to pos in response to
 // an UpdateBumpalong node.  This is used when we want to inform the scan loop that
 // it should bump from this location rather than from the original location.
 func (c *converter) emitExecuteUpdateBumpalong(rm *regexpData, node *syntax.RegexNode) {
 	c.transferSliceStaticPosToPos(rm, false)
-	c.writeLine(`if base.runtextpos < pos {
+	c.writeLine(`if r.Runtextpos < pos {
 		r.Runtextpos = pos
 	}`)
 }
@@ -368,15 +369,16 @@ func (c *converter) emitExecuteConcatenation(rm *regexpData, node *syntax.RegexN
 
 			for i < exclusiveEnd {
 				for ; i < exclusiveEnd; i++ {
-					child := node.Children[0]
+					child := node.Children[i]
 					if ok, nodesConsumed, caseInsensitiveString := node.TryGetOrdinalCaseInsensitiveString(i, exclusiveEnd, false); ok {
 						writePrefix()
 						sourceSpan := rm.sliceSpan
 						if rm.sliceStaticPos > 0 {
 							sourceSpan = fmt.Sprintf("%s[%v:]", rm.sliceSpan, rm.sliceStaticPos)
 						}
-						c.write(fmt.Sprintf("!helpers.StartsWith(%s, %s, true)", sourceSpan, caseInsensitiveString))
-						*prevDescription = fmt.Sprintf("Match the string %#v (ordinal case-insensitive)", caseInsensitiveString)
+						c.write(fmt.Sprintf("!helpers.StartsWithIgnoreCase(%s, %s)", sourceSpan, caseInsensitiveString))
+						desc := fmt.Sprintf("Match the string %#v (ordinal case-insensitive)", caseInsensitiveString)
+						prevDescription = &desc
 						wroteClauses = true
 
 						rm.sliceStaticPos += len(caseInsensitiveString)
@@ -384,7 +386,8 @@ func (c *converter) emitExecuteConcatenation(rm *regexpData, node *syntax.RegexN
 					} else if child.T == syntax.NtMulti {
 						writePrefix()
 						c.emitExecuteMultiCharString(rm, child.Str, false, true, false)
-						*prevDescription = describeNode(rm, child)
+						desc := describeNode(rm, child)
+						prevDescription = &desc
 						wroteClauses = true
 					} else if (child.IsOneFamily() || child.IsNotoneFamily() || child.IsSetFamily()) &&
 						child.M == child.N &&
@@ -398,7 +401,8 @@ func (c *converter) emitExecuteConcatenation(rm *regexpData, node *syntax.RegexN
 							writePrefix()
 							c.emitExecuteSingleChar(rm, child, false, nil, true)
 							if x == 0 {
-								*prevDescription = describeNode(rm, child)
+								desc := describeNode(rm, child)
+								prevDescription = &desc
 							} else {
 								prevDescription = nil
 							}
@@ -411,9 +415,10 @@ func (c *converter) emitExecuteConcatenation(rm *regexpData, node *syntax.RegexN
 
 				if wroteClauses {
 					if prevDescription != nil {
-						c.writeLineFmt("/* %s */", *prevDescription)
+						c.writeLineFmt("/* %s */ {", *prevDescription)
+					} else {
+						c.writeLine(" {")
 					}
-					c.writeLine(" {")
 					c.emitExecuteGoto(rm, rm.doneLabel)
 					c.writeLine("}")
 
@@ -476,7 +481,7 @@ func (c *converter) emitExecuteMultiCharString(rm *regexpData, str []rune, emitL
 
 	sourceSpan := rm.sliceSpan
 	if rm.sliceStaticPos > 0 {
-		sourceSpan = fmt.Sprintf("%s[%v]", rm.sliceSpan, rm.sliceStaticPos)
+		sourceSpan = fmt.Sprintf("%s[%v:]", rm.sliceSpan, rm.sliceStaticPos)
 	}
 	clause := fmt.Sprintf("!helpers.StartsWith(%s, %s)", sourceSpan, getRuneSliceLiteral(str))
 	if clauseOnly {
@@ -534,11 +539,417 @@ func (c *converter) emitExecuteSingleChar(rm *regexpData, node *syntax.RegexNode
 
 // emitLengthChecksIfRequired=true
 func (c *converter) emitExecuteSingleCharLoop(rm *regexpData, node *syntax.RegexNode, subsequent *syntax.RegexNode, emitLengthChecksIfRequired bool) {
+	// If this is actually atomic based on its parent, emit it as atomic instead; no backtracking necessary.
+	if rm.Analysis.IsAtomicByAncestor(node) {
+		c.emitExecuteSingleCharAtomicLoop(rm, node, true)
+		return
+	}
+
+	// If this is actually a repeater, emit that instead; no backtracking necessary.
+	if node.M == node.N {
+		c.emitExecuteSingleCharRepeater(rm, node, emitLengthChecksIfRequired)
+		return
+	}
+
+	// Emit backtracking around an atomic single char loop.  We can then implement the backtracking
+	// as an afterthought, since we know exactly how many characters are accepted by each iteration
+	// of the wrapped loop (1) and that there's nothing captured by the loop.
+
+	backtrackingLabel := rm.reserveName("CharLoopBacktrack")
+	endLoop := rm.reserveName("CharLoopEnd")
+	startingPos := rm.reserveName("charloop_starting_pos")
+	endingPos := rm.reserveName("charloop_ending_pos")
+	rm.additionalDeclarations = append(rm.additionalDeclarations, fmt.Sprintf("var %s, %s = 0, 0", startingPos, endingPos))
+	rtl := node.Options&syntax.RightToLeft != 0
+	isInLoop := rm.Analysis.IsInLoop(node)
+
+	// We're about to enter a loop, so ensure our text position is 0.
+	c.transferSliceStaticPosToPos(rm, false)
+
+	// Grab the current position, then emit the loop as atomic, and then
+	// grab the current position again.  Even though we emit the loop without
+	// knowledge of backtracking, we can layer it on top by just walking back
+	// through the individual characters (a benefit of the loop matching exactly
+	// one character per iteration, no possible captures within the loop, etc.)
+	c.writeLineFmt("%s = pos\n", startingPos)
+	c.emitExecuteSingleCharAtomicLoop(rm, node, true)
+	c.writeLine("")
+
+	c.transferSliceStaticPosToPos(rm, false)
+	c.writeLineFmt("%s = pos", endingPos)
+	if !rtl {
+		c.emitAddStmt(startingPos, node.M)
+	} else {
+		c.emitAddStmt(startingPos, -node.M)
+	}
+	c.emitExecuteGoto(rm, endLoop)
+	c.writeLine("")
+
+	// Backtracking section. Subsequent failures will jump to here, at which
+	// point we decrement the matched count as long as it's above the minimum
+	// required, and try again by flowing to everything that comes after this.
+	c.emitMarkLabel(backtrackingLabel)
+	stackCookie := c.createStackCookie()
+	var capturePos string
+	if isInLoop {
+		// This loop is inside of another loop, which means we persist state
+		// on the backtracking stack rather than relying on locals to always
+		// hold the right state (if we didn't do that, another iteration of the
+		// outer loop could have resulted in the locals being overwritten).
+		// Pop the relevant state from the stack.
+		if rm.expressionHasCaptures {
+			c.emitUncaptureUntil("r.StackPop()")
+		}
+		c.emitStackPop(stackCookie, endingPos, startingPos)
+	} else if rm.expressionHasCaptures {
+		// Since we're not in a loop, we're using a local to track the crawl position.
+		// Unwind back to the position we were at prior to running the code after this loop.
+		capturePos = rm.reserveName("charloop_capture_pos")
+		rm.additionalDeclarations = append(rm.additionalDeclarations, "%s := 0", capturePos)
+		c.emitUncaptureUntil(capturePos)
+	}
+	c.writeLine("")
+
+	// We're backtracking.  Check the timeout.
+	c.emitTimeoutCheckIfNeeded(rm)
+
+	var literalNode *syntax.RegexNode
+	if subsequent != nil {
+		literalNode = subsequent.FindStartingLiteralNode(true)
+	}
+	var literalLength int
+	var indexOfExpr string
+
+	if !rtl &&
+		node.N > 1 && // no point in using IndexOf for small loops, in particular optionals
+		literalNode != nil &&
+		c.tryEmitExecuteIndexOf(rm, literalNode, fmt.Sprintf("r.Runtext[%s:%%s]", endingPos), true, false, &literalLength, &indexOfExpr) {
+		//hack -- if the indexOfExpr comes back it'll be a format string (notice the double %)
+		//for the final index into the slice so we can populate it here
+		//e.g. r.Runtext[endingPos:%s]
+		c.writeLineFmt(`if %s >= %s {`, startingPos, endingPos)
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}")
+
+		if literalLength > 1 {
+			//TODO: bounds check? min(len(r.Runtext),endingPos+literalLength-1)
+			indexOfExpr = fmt.Sprintf(indexOfExpr, fmt.Sprintf("%s+%v-1", endingPos, literalLength))
+		} else {
+			indexOfExpr = fmt.Sprintf(indexOfExpr, endingPos)
+		}
+		c.writeLineFmt("%s = %s", endingPos, indexOfExpr)
+		c.writeLineFmt("if %s < 0 { // miss", endingPos)
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}")
+		c.writeLineFmt(`%s += %s
+			pos = %[1]s`, endingPos, startingPos)
+	} else {
+		op := ">="
+		if rtl {
+			op = "<="
+		}
+		c.writeLineFmt("if %s %s %s {", startingPos, op, endingPos)
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}")
+		if !rtl {
+			c.writeLineFmt(`%s--
+			pos = %[1]s`, endingPos)
+		} else {
+			c.writeLineFmt(`%s++
+			pos = %[1]s`, endingPos)
+		}
+	}
+
+	if !rtl {
+		c.sliceInputSpan(rm, false)
+	}
+	c.writeLine("")
+
+	c.emitMarkLabel(endLoop)
+	if isInLoop {
+		// We're in a loop and thus can't rely on locals correctly holding the state we
+		// need (the locals could be overwritten by a subsequent iteration).  Push the state
+		// on to the backtracking stack.
+		if rm.expressionHasCaptures {
+			c.emitStackPush(stackCookie, startingPos, endingPos, "r.Crawlpos()")
+		} else {
+			c.emitStackPush(stackCookie, startingPos, endingPos)
+		}
+	} else if len(capturePos) > 0 {
+		// We're not in a loop and so can trust our locals.  Store the current capture position
+		// into the capture position local; we'll uncapture back to this when backtracking to
+		// remove any captures from after this loop that we need to throw away.
+		c.writeLineFmt("%s = r.Crawlpos()", capturePos)
+	}
+
+	rm.doneLabel = backtrackingLabel // leave set to the backtracking label for all subsequent nodes
+}
+
+func (c *converter) emitMarkLabel(label string) {
+	c.writeLineFmt("%s:", label)
 }
 
 // emitLengthChecksIfRequired=true
 func (c *converter) emitExecuteSingleCharLazy(rm *regexpData, node *syntax.RegexNode, subsequent *syntax.RegexNode, emitLengthChecksIfRequired bool) {
 }
+
+// Emits the code to handle a non-backtracking, variable-length loop around a single character comparison.
+// emitLengthChecksIfRequired=true
+func (c *converter) emitExecuteSingleCharAtomicLoop(rm *regexpData, node *syntax.RegexNode, emitLengthChecksIfRequired bool) {
+	// If this is actually a repeater, emit that instead.
+	if node.M == node.N {
+		c.emitExecuteSingleCharRepeater(rm, node, emitLengthChecksIfRequired)
+		return
+	}
+
+	// If this is actually an optional single char, emit that instead.
+	if node.M == 0 && node.N == 1 {
+		c.emitExecuteAtomicSingleCharZeroOrOne(rm, node)
+		return
+	}
+
+	minIterations := node.M
+	maxIterations := node.N
+	rtl := (node.Options & syntax.RightToLeft) != 0
+	iterationLocal := rm.reserveName("iteration")
+	var indexOfExpr string
+
+	if rtl {
+		c.transferSliceStaticPosToPos(rm, false) // we don't use static position for rtl
+
+		if node.IsSetFamily() && maxIterations == math.MaxInt32 && node.Set.IsAnything() {
+			// If this loop will consume the remainder of the input, just set the iteration variable
+			// to pos directly rather than looping to get there.
+			c.writeLineFmt("%s := pos", iterationLocal)
+		} else {
+			c.writeLineFmt("%s := 0", iterationLocal)
+
+			expr := fmt.Sprintf("r.Runtext[pos - %s - 1]", iterationLocal)
+			if node.IsSetFamily() {
+				expr = c.emitMatchCharacterClass(rm, node.Set, false, expr)
+			} else {
+				op := "!="
+				if node.IsOneFamily() {
+					op = "=="
+				}
+				expr = fmt.Sprintf("%s %s %q", expr, op, node.Ch)
+			}
+
+			maxClause := ""
+			if maxIterations != math.MaxInt32 {
+				maxClause = fmt.Sprintf("%s && ", countIsLessThan(iterationLocal, maxIterations))
+			}
+			c.writeLineFmt(`for %spos > %s && %s {
+					%[2]s++
+				}
+				`, maxClause, iterationLocal, expr)
+		}
+	} else if node.IsSetFamily() && maxIterations == math.MaxInt32 && node.Set.IsAnything() {
+		// .* was used with RegexOptions.Singleline, which means it'll consume everything.  Just jump to the end.
+		// The unbounded constraint is the same as in the Notone case above, done purely for simplicity.
+
+		c.transferSliceStaticPosToPos(rm, false)
+		c.writeLineFmt("%s := r.Runtextend - pos", iterationLocal)
+	} else if c.tryEmitExecuteIndexOf(rm, node, "%s", false, true, new(int), &indexOfExpr) {
+		// We can use an IndexOf method to perform the search. If the number of iterations is unbounded, we can just search the whole span.
+		// If, however, it's bounded, we need to slice the span to the min(remainingSpan.Length, maxIterations) so that we don't
+		// search more than is necessary.
+
+		// If maxIterations is 0, the node should have been optimized away. If it's 1 and min is 0, it should
+		// have been handled as an optional loop above, and if it's 1 and min is 1, it should have been transformed
+		// into a single char match. So, we should only be here if maxIterations is greater than 1. And that's relevant,
+		// because we wouldn't want to invest in an IndexOf call if we're only going to iterate once.
+		c.transferSliceStaticPosToPos(rm, false)
+
+		if maxIterations != math.MaxInt32 {
+			indexOfExpr = fmt.Sprintf(indexOfExpr, fmt.Sprintf("%s[:helpers.Min(len(%[1]s), %v)]", rm.sliceSpan, maxIterations))
+		} else {
+			indexOfExpr = fmt.Sprintf(indexOfExpr, rm.sliceSpan)
+		}
+		c.writeLineFmt("%s := %s", iterationLocal, indexOfExpr)
+
+		rhs := fmt.Sprintf("len(%s)", rm.sliceSpan)
+		if maxIterations != math.MaxInt32 {
+			rhs = fmt.Sprintf("helpers.Min(len(%s), %v)", rm.sliceSpan, maxIterations)
+		}
+		c.writeLineFmt(`if %s < 0 {
+				%[1]s = %s
+			}
+			`, iterationLocal, rhs)
+	} else {
+		// For everything else, do a normal loop.
+		expr := fmt.Sprintf("%s[%v]", rm.sliceSpan, iterationLocal)
+		if node.IsSetFamily() {
+			expr = c.emitMatchCharacterClass(rm, node.Set, false, expr)
+		} else {
+			op := "!="
+			if node.IsOneFamily() {
+				op = "=="
+			}
+			expr = fmt.Sprintf("%s %s %q", expr, op, node.Ch)
+		}
+
+		if minIterations != 0 || maxIterations != math.MaxInt32 {
+			// For any loops other than * loops, transfer text pos to pos in
+			// order to zero it out to be able to use the single iteration variable
+			// for both iteration count and indexer.
+			c.transferSliceStaticPosToPos(rm, false)
+		}
+
+		c.writeLineFmt("%s = %v", iterationLocal, rm.sliceStaticPos)
+		rm.sliceStaticPos = 0
+
+		maxClause := ""
+		if maxIterations != math.MaxInt32 {
+			maxClause = fmt.Sprintf("%s && ", countIsLessThan(iterationLocal, maxIterations))
+		}
+		c.writeLineFmt(`for %s%s < len(%s) && %s {
+			   %[2]s++
+		   }
+		   `, maxClause, iterationLocal, rm.sliceSpan, expr)
+	}
+
+	// Check to ensure we've found at least min iterations.
+	if minIterations > 0 {
+		c.writeLineFmt("if %s {", countIsLessThan(iterationLocal, minIterations))
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}\n")
+	}
+
+	// Now that we've completed our optional iterations, advance the text span
+	// and pos by the number of iterations completed.
+
+	if !rtl {
+		c.writeLineFmt(`%s = %[1]s[%s:]
+			pos += %[2]s`, rm.sliceSpan, iterationLocal)
+	} else {
+		c.writeLineFmt("pos -= %s", iterationLocal)
+	}
+}
+
+// Gets a comparison for whether the iteration count is less than the upper bound.
+func countIsLessThan(count string, exclusiveUpper int) string {
+	if exclusiveUpper == 1 {
+		return count + " == 0"
+	}
+	return fmt.Sprintf("%s < %v", count, exclusiveUpper)
+}
+
+func (c *converter) emitExecuteSingleCharRepeater(rm *regexpData, node *syntax.RegexNode, emitLengthChecksIfRequired bool) {
+}
+
+// Emits the code to handle a non-backtracking optional zero-or-one loop.
+func (c *converter) emitExecuteAtomicSingleCharZeroOrOne(rm *regexpData, node *syntax.RegexNode) {
+	rtl := (node.Options & syntax.RightToLeft) != 0
+	if rtl {
+		c.transferSliceStaticPosToPos(rm, false) // we don't use static pos for rtl
+	}
+
+	expr := fmt.Sprintf("%s[%v]", rm.sliceSpan, rm.sliceStaticPos)
+	if rtl {
+		expr = "r.Runtext[pos-1]"
+	}
+
+	if node.IsSetFamily() {
+		expr = c.emitMatchCharacterClass(rm, node.Set, false, expr)
+	} else {
+		op := "!="
+		if node.IsOneFamily() {
+			op = "=="
+		}
+		expr = fmt.Sprintf("%s %s %q", expr, op, node.Ch)
+	}
+
+	var spaceAvailable string
+	if rtl {
+		spaceAvailable = "pos > 0"
+	} else if rm.sliceStaticPos != 0 {
+		spaceAvailable = fmt.Sprintf("len(%s) > %v", rm.sliceSpan, rm.sliceStaticPos)
+	} else {
+		spaceAvailable = fmt.Sprintf("len(%s) == 0", rm.sliceSpan)
+	}
+
+	c.writeLineFmt("if %s && %s {", spaceAvailable, expr)
+	if !rtl {
+		c.writeLineFmt(`%s = %[1]s[1:]
+		pos++`, rm.sliceSpan)
+	} else {
+		c.writeLineFmt("pos--")
+	}
+	c.writeLine("}")
+}
+
+func (c *converter) emitTimeoutCheckIfNeeded(rm *regexpData) {
+}
+
+// tries to create an indexof call for a node
+func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode, spanName string, useLast bool, negate bool, literalLength *int, indexOfExpr *string) bool {
+	last := ""
+	if useLast {
+		last = "Last"
+	}
+
+	if node.T == syntax.NtMulti {
+		*indexOfExpr = fmt.Sprintf("helpers.%sIndexOf(%s, %s)", last, spanName, getRuneSliceLiteral(node.Str))
+		*literalLength = len(node.Str)
+		return true
+	}
+
+	if node.IsOneFamily() {
+		var expr string
+		if negate {
+			expr = fmt.Sprintf("helpers.%sIndexOfAnyExcept1(%s, %q)", last, spanName, node.Ch)
+		} else {
+			expr = fmt.Sprintf("helpers.%sIndexOfAny1(%s, %q)", last, spanName, node.Ch)
+		}
+		*indexOfExpr = expr
+		*literalLength = 1
+		return true
+	}
+
+	if node.IsNotoneFamily() {
+		var expr string
+		if negate {
+			expr = fmt.Sprintf("helpers.%sIndexOfAny1(%s, %q)", last, spanName, node.Ch)
+		} else {
+			expr = fmt.Sprintf("helpers.%sIndexOfAnyExcept1(%s, %q)", last, spanName, node.Ch)
+		}
+		*indexOfExpr = expr
+		*literalLength = 1
+		return true
+	}
+
+	if node.IsSetFamily() {
+		negated := node.Set.IsNegated() != negate
+
+		// Prefer IndexOfAnyInRange over IndexOfAny, except for tiny ranges (1 or 2 items) that IndexOfAny handles more efficiently
+		if rs := node.Set.GetIfNRanges(1); len(rs) == 1 && rs[0].Last-rs[0].First > 1 {
+			var expr string
+			if negated {
+				expr = fmt.Sprintf("helpers.%sIndexOfAnyExceptInRange(%s, %q, %q)", last, spanName, rs[0].First, rs[0].Last)
+			} else {
+				expr = fmt.Sprintf("helpers.%sIndexOfAnyInRange(%s, %q, %q)", last, spanName, rs[0].First, rs[0].Last)
+			}
+			*indexOfExpr = expr
+			*literalLength = 1
+			return true
+		}
+
+		setChars := make([]rune, 0, 128)
+		setChars = node.Set.GetSetChars(setChars)
+		if len(setChars) > 0 {
+			expr := c.emitIndexOfChars(setChars, negate, spanName)
+			*indexOfExpr = expr
+			*literalLength = 1
+			return true
+		}
+	}
+
+	indexOfExpr = nil
+	*literalLength = 0
+	return false
+}
+
 func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 }
 func (c *converter) emitExecuteBoundary(rm *regexpData, node *syntax.RegexNode) {
@@ -547,8 +958,374 @@ func (c *converter) emitExecuteLoop(rm *regexpData, node *syntax.RegexNode) {
 }
 func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 }
+
+// arbitrary limit; we want it to be large enough to handle ignore-case of common sets, like hex, the latin alphabet, etc.
+const SetCharsSize = 64
+
 func (c *converter) emitExecuteAlternation(rm *regexpData, node *syntax.RegexNode) {
+	originalDoneLabel := rm.doneLabel
+
+	// Both atomic and non-atomic are supported.  While a parent RegexNode.Atomic node will itself
+	// successfully prevent backtracking into this child node, we can emit better / cheaper code
+	// for an Alternate when it is atomic, so we still take it into account here.
+	isAtomic := rm.Analysis.IsAtomicByAncestor(node)
+
+	// If no child branch overlaps with another child branch, we can emit more streamlined code
+	// that avoids checking unnecessary branches, e.g. with abc|def|ghi if the next character in
+	// the input is 'a', we needn't try the def or ghi branches.  A simple, relatively common case
+	// of this is if every branch begins with a specific, unique character, in which case
+	// the whole alternation can be treated as a simple switch, so we special-case that. However,
+	// we can't goto _into_ switch cases, which means we can't use this approach if there's any
+	// possibility of backtracking into the alternation.
+	useSwitchedBranches := false
+	if node.Options&syntax.RightToLeft == 0 {
+		useSwitchedBranches = isAtomic
+		if !useSwitchedBranches {
+			useSwitchedBranches = true
+			for i := 0; i < len(node.Children); i++ {
+				if rm.Analysis.MayBacktrack(node.Children[i]) {
+					useSwitchedBranches = false
+					break
+				}
+			}
+		}
+	}
+
+	// Detect whether every branch begins with one or more unique characters.
+	setChars := make([]rune, 0, SetCharsSize)
+	if useSwitchedBranches {
+		// Iterate through every branch, seeing if we can easily find a starting One, Multi, or small Set.
+		// If we can, extract its starting char (or multiple in the case of a set), validate that all such
+		// starting characters are unique relative to all the branches.
+		seenChars := make(map[rune]struct{})
+		for i := 0; i < len(node.Children) && useSwitchedBranches; i++ {
+			// Look for the guaranteed starting node that's a one, multi, set,
+			// or loop of one of those with at least one minimum iteration. We need to exclude notones.
+			startingLiteralNode := node.Children[i].FindStartingLiteralNode(false)
+			if startingLiteralNode == nil || startingLiteralNode.IsNotoneFamily() {
+				useSwitchedBranches = false
+				break
+			}
+
+			// If it's a One or a Multi, get the first character and add it to the set.
+			// If it was already in the set, we can't apply this optimization.
+			if startingLiteralNode.IsOneFamily() || startingLiteralNode.T == syntax.NtMulti {
+				st := startingLiteralNode.FirstCharOfOneOrMulti()
+				if _, ok := seenChars[st]; ok {
+					useSwitchedBranches = false
+					break
+				}
+				seenChars[st] = struct{}{}
+			} else {
+				// The branch begins with a set.  Make sure it's a set of only a few characters
+				// and get them.  If we can't, we can't apply this optimization.
+				setChars = startingLiteralNode.Set.GetSetChars(setChars)
+				if startingLiteralNode.Set.IsNegated() || len(setChars) == 0 {
+					useSwitchedBranches = false
+					break
+				}
+
+				// Check to make sure each of the chars is unique relative to all other branches examined.
+				for _, c := range setChars {
+					if _, ok := seenChars[c]; ok {
+						useSwitchedBranches = false
+						break
+					}
+					seenChars[c] = struct{}{}
+				}
+			}
+		}
+	}
+
+	if useSwitchedBranches {
+		// Note: This optimization does not exist with RegexOptions.Compiled.  Here we rely on the
+		// C# compiler to lower the C# switch statement with appropriate optimizations. In some
+		// cases there are enough branches that the compiler will emit a jump table.  In others
+		// it'll optimize the order of checks in order to minimize the total number in the worst
+		// case.  In any case, we get easier to read and reason about C#.
+		//c.emitExecuteSwitchedBranches()
+		// We need at least 1 remaining character in the span, for the char to switch on.
+		c.emitSpanLengthCheck(rm, 1, nil)
+		c.writeLine("")
+
+		// Emit a switch statement on the first char of each branch.
+		c.writeLineFmt("switch %s[%v] {", rm.sliceSpan, rm.sliceStaticPos)
+
+		startingSliceStaticPos := rm.sliceStaticPos
+
+		// Emit a case for each branch.
+		for i := 0; i < len(node.Children); i++ {
+			rm.sliceStaticPos = startingSliceStaticPos
+
+			// We know we're only in this code if every branch has a valid starting literal node. Get it.
+			// We also get the immediate child. Ideally they're the same, in which case we might be able to
+			// use the switch as the processing of that node, e.g. if the node is a One, then by matching the
+			// literal via the switch, we've fully processed it. But there may be other cases in which it's not
+			// sufficient, e.g. if that one was wrapped in a Capture, we still want to emit the capture code,
+			// and for simplicity, we still end up emitting the re-evaluation of that character. It's still much
+			// cheaper to do this than to emit the full alternation code.
+			child := node.Children[i]
+			startingLiteralNode := child.FindStartingLiteralNode(false)
+
+			// Emit the case for this branch to match on the first character.
+			if startingLiteralNode.IsSetFamily() {
+				setChars = startingLiteralNode.Set.GetSetChars(setChars)
+				c.writeLineFmt("case %s:", getRuneLiteralParams(setChars))
+			} else {
+				c.writeLineFmt("case %q:", startingLiteralNode.FirstCharOfOneOrMulti())
+			}
+
+			// Emit the code for the branch, without the first character that was already matched in the switch.
+			var remainder *syntax.RegexNode
+		HandleChild:
+			switch child.T {
+			case syntax.NtOne, syntax.NtSet:
+				// The character was handled entirely by the switch. No additional matching is needed.
+				rm.sliceStaticPos++
+
+			case syntax.NtMulti:
+				// First character was handled by the switch. Emit matching code for the remainder of the multi string.
+				rm.sliceStaticPos++
+				if len(child.Str) == 2 {
+					c.emitExecuteNode(rm, &syntax.RegexNode{T: syntax.NtOne, Options: child.Options, Ch: child.Str[1]}, nil, true)
+				} else {
+					c.emitExecuteNode(rm, &syntax.RegexNode{T: syntax.NtMulti, Options: child.Options, Str: child.Str[1:]}, nil, true)
+				}
+				c.writeLine("")
+
+			case syntax.NtConcatenate:
+				if child.Children[0] == startingLiteralNode &&
+					(startingLiteralNode.T == syntax.NtOne || startingLiteralNode.T == syntax.NtSet || startingLiteralNode.T == syntax.NtMulti) {
+					// This is a concatenation where its first node is the starting literal we found and that starting literal
+					// is one of the nodes above that we know how to handle completely. This is a common
+					// enough case that we want to special-case it to avoid duplicating the processing for that character
+					// unnecessarily. So, we'll shave off that first node from the concatenation and then handle the remainder.
+					// Note that it's critical startingLiteralNode is something we can fully handle above: if it's not,
+					// we'll end up losing some of the pattern due to overwriting `remainder`.
+					remainder = child
+					child = child.Children[0]
+					remainder.ReplaceChild(0, &syntax.RegexNode{T: syntax.NtEmpty, Options: remainder.Options})
+					goto HandleChild // reprocess just the first node that was saved; the remainder will then be processed below
+				}
+			default:
+				remainder = child
+			}
+
+			if remainder != nil {
+				// Emit a full match for whatever part of the child we haven't yet handled.
+				c.emitExecuteNode(rm, remainder, nil, true)
+				c.writeLine("")
+			}
+
+			// This is only ever used for atomic alternations, so we can simply reset the doneLabel
+			// after emitting the child, as nothing will backtrack here (and we need to reset it
+			// so that all branches see the original).
+			rm.doneLabel = originalDoneLabel
+
+			// If we get here in the generated code, the branch completed successfully.
+			// Before jumping to the end, we need to zero out sliceStaticPos, so that no
+			// matter what the value is after the branch, whatever follows the alternate
+			// will see the same sliceStaticPos.
+			c.transferSliceStaticPosToPos(rm, false)
+			c.writeLine("")
+		}
+
+		// Default branch if the character didn't match the start of any branches.
+		c.emitCaseGoto(rm, "default:", rm.doneLabel)
+		c.writeLine("}")
+
+	} else {
+		//c.emitExecuteAllBranches(rm)
+		// Label to jump to when any branch completes successfully.
+		matchLabel := rm.reserveName("AlternationMatch")
+
+		// Save off pos.  We'll need to reset this each time a branch fails.
+		startingPos := rm.reserveName("alternation_starting_pos")
+		canUseLocalsForAllState := !isAtomic && !rm.Analysis.IsInLoop(node)
+		if canUseLocalsForAllState {
+			// Because of how control flow and definite assignment works in the C# compiler, we can end
+			// up in situations where backtracking by hopping between labels leads the compiler to see
+			// things as not definitely assigned even if in practice they will be.  To avoid compilation
+			// errors with such complicated patterns we need to ensure the locals are declared and
+			// initialized at the beginning of the method.
+			rm.addLocalDec(fmt.Sprintf("%s := 0", startingPos))
+			c.writeLineFmt("%s = pos", startingPos)
+		} else {
+			c.writeLineFmt("%s := pos", startingPos)
+		}
+		startingSliceStaticPos := rm.sliceStaticPos
+
+		// We need to be able to undo captures in two situations:
+		// - If a branch of the alternation itself contains captures, then if that branch
+		//   fails to match, any captures from that branch until that failure point need to
+		//   be uncaptured prior to jumping to the next branch.
+		// - If the expression after the alternation contains captures, then failures
+		//   to match in those expressions could trigger backtracking back into the
+		//   alternation, and thus we need uncapture any of them.
+		// As such, if the alternation contains captures or if it's not atomic, we need
+		// to grab the current crawl position so we can unwind back to it when necessary.
+		// We can do all of the uncapturing as part of falling through to the next branch.
+		// If we fail in a branch, then such uncapturing will unwind back to the position
+		// at the start of the alternation.  If we fail after the alternation, and the
+		// matched branch didn't contain any backtracking, then the failure will end up
+		// jumping to the next branch, which will unwind the captures.  And if we fail after
+		// the alternation and the matched branch did contain backtracking, that backtracking
+		// construct is responsible for unwinding back to its starting crawl position. If
+		// it eventually ends up failing, that failure will result in jumping to the next branch
+		// of the alternation, which will again dutifully unwind the remaining captures until
+		// what they were at the start of the alternation.  Of course, if there are no captures
+		// anywhere in the regex, we don't have to do any of that.
+		var startingCapturePos string
+		if rm.expressionHasCaptures && (rm.Analysis.MayContainCapture(node) || !isAtomic) {
+			startingCapturePos = rm.reserveName("alternation_starting_capturepos")
+			if canUseLocalsForAllState {
+				rm.addLocalDec(fmt.Sprintf("%s := 0", startingCapturePos))
+				c.writeLineFmt("%s = r.Crawlpos()", startingCapturePos)
+			} else {
+				c.writeLineFmt("%s := r.Crawlpos()", startingCapturePos)
+			}
+		}
+		c.writeLine("")
+
+		// After executing the alternation, subsequent matching may fail, at which point execution
+		// will need to backtrack to the alternation.  We emit a branching table at the end of the
+		// alternation, with a label that will be left as the "doneLabel" upon exiting emitting the
+		// alternation.  The branch table is populated with an entry for each branch of the alternation,
+		// containing either the label for the last backtracking construct in the branch if such a construct
+		// existed (in which case the doneLabel upon emitting that node will be different from before it)
+		// or the label for the next branch.
+		labelMap := make([]string, len(node.Children))
+		backtrackLabel := rm.reserveName("AlternationBacktrack")
+		var currentBranch string
+		if canUseLocalsForAllState {
+			// We're not atomic, so we'll have to handle backtracking, but we're not inside of a loop,
+			// so we can store the current branch in a local rather than pushing it on to the backtracking
+			// stack (if we were in a loop, such a local couldn't be used as it could be overwritten by
+			// a subsequent iteration of that outer loop).
+			currentBranch = rm.reserveName("alternation_branch")
+			rm.addLocalDec(fmt.Sprintf("%s := 0", currentBranch))
+		}
+
+		stackCookie := c.createStackCookie()
+		for i := 0; i < len(node.Children); i++ {
+			// If the alternation isn't atomic, backtracking may require our jump table jumping back
+			// into these branches, so we can't use actual scopes, as that would hide the labels.
+			c.writeLineFmt("// Branch %v", i)
+			isLastBranch := i == len(node.Children)-1
+
+			var nextBranch string
+			if !isLastBranch {
+				// Failure to match any branch other than the last one should result
+				// in jumping to process the next branch.
+				nextBranch = rm.reserveName("AlternationBranch")
+				rm.doneLabel = nextBranch
+			} else {
+				// Failure to match the last branch is equivalent to failing to match
+				// the whole alternation, which means those failures should jump to
+				// what "doneLabel" was defined as when starting the alternation.
+				rm.doneLabel = originalDoneLabel
+			}
+
+			// Emit the code for each branch.
+			c.emitExecuteNode(rm, node.Children[i], nil, true)
+			c.writeLine("")
+
+			// Add this branch to the backtracking table.  At this point, either the child
+			// had backtracking constructs, in which case doneLabel points to the last one
+			// and that's where we'll want to jump to, or it doesn't, in which case doneLabel
+			// still points to the nextBranch, which similarly is where we'll want to jump to.
+			if !isAtomic {
+				// If we're inside of a loop, push the state we need to preserve on to the
+				// the backtracking stack.  If we're not inside of a loop, simply ensure all
+				// the relevant state is stored in our locals.
+				if len(currentBranch) == 0 {
+					if len(startingCapturePos) != 0 {
+						c.emitStackPush(stackCookie+i, string(i), startingPos, startingCapturePos)
+					} else {
+						c.emitStackPush(stackCookie+i, string(i), startingPos)
+					}
+				} else {
+					c.writeLineFmt("%s = %v", currentBranch, i)
+				}
+			}
+			labelMap[i] = rm.doneLabel
+
+			// If we get here in the generated code, the branch completed successfully.
+			// Before jumping to the end, we need to zero out sliceStaticPos, so that no
+			// matter what the value is after the branch, whatever follows the alternate
+			// will see the same sliceStaticPos.
+			c.transferSliceStaticPosToPos(rm, false)
+			if !isLastBranch || !isAtomic {
+				// If this isn't the last branch, we're about to output a reset section,
+				// and if this isn't atomic, there will be a backtracking section before
+				// the end of the method.  In both of those cases, we've successfully
+				// matched and need to skip over that code.  If, however, this is the
+				// last branch and this is an atomic alternation, we can just fall
+				// through to the successfully matched location.
+				c.emitExecuteGoto(rm, matchLabel)
+			}
+
+			// Reset state for next branch and loop around to generate it.  This includes
+			// setting pos back to what it was at the beginning of the alternation,
+			// updating slice to be the full length it was, and if there's a capture that
+			// needs to be reset, uncapturing it.
+			if !isLastBranch {
+				c.writeLine("")
+				c.emitMarkLabel(nextBranch)
+				c.writeLineFmt("pos = %s", startingPos)
+				c.sliceInputSpan(rm, false)
+				rm.sliceStaticPos = startingSliceStaticPos
+				if len(startingCapturePos) != 0 {
+					c.emitUncaptureUntil(startingCapturePos)
+				}
+			}
+
+			c.writeLine("")
+		}
+
+		// We should never fall through to this location in the generated code.  Either
+		// a branch succeeded in matching and jumped to the end, or a branch failed in
+		// matching and jumped to the next branch location.  We only get to this code
+		// if backtracking occurs and the code explicitly jumps here based on our setting
+		// "doneLabel" to the label for this section.  Thus, we only need to emit it if
+		// something can backtrack to us, which can't happen if we're inside of an atomic
+		// node. Thus, emit the backtracking section only if we're non-atomic.
+		if isAtomic {
+			rm.doneLabel = originalDoneLabel
+		} else {
+			rm.doneLabel = backtrackLabel
+			c.emitMarkLabel(backtrackLabel)
+
+			// We're backtracking.  Check the timeout.
+			c.emitTimeoutCheckIfNeeded(rm)
+
+			var switchClause string
+			if len(currentBranch) == 0 {
+				// We're in a loop, so we use the backtracking stack to persist our state.
+				// Pop it off and validate the stack position.
+				if len(startingCapturePos) != 0 {
+					c.emitStackPop(0, startingCapturePos, startingPos)
+				} else {
+					c.emitStackPop(0, startingPos)
+				}
+
+				switchClause = c.validateStackCookieWithAdditionAndReturnPoppedStack(stackCookie)
+			} else {
+				// We're not in a loop, so our locals already store the state we need.
+				switchClause = currentBranch
+			}
+			c.writeLineFmt("switch %s {", switchClause)
+			for i := 0; i < len(labelMap); i++ {
+				c.emitCaseGoto(rm, fmt.Sprintf("case %v:", i), labelMap[i])
+			}
+			c.writeLine("}\n")
+		}
+
+		// Successfully completed the alternate.
+		c.emitMarkLabel(matchLabel)
+	}
 }
+
 func (c *converter) emitExecuteBackreference(rm *regexpData, node *syntax.RegexNode) {
 }
 func (c *converter) emitExecuteBackreferenceConditional(rm *regexpData, node *syntax.RegexNode) {
@@ -576,15 +1353,105 @@ func (c *converter) emitExecuteGoto(rm *regexpData, label string) {
 		if rm.expressionHasCaptures {
 			c.emitUncaptureUntil("0")
 		}
-		c.writeLine("return false // The input didn't match.")
+		c.writeLine("return nil // The input didn't match.")
 	} else {
 		c.writeLineFmt("goto %s", label)
 	}
 }
 
+func (c *converter) emitCaseGoto(rm *regexpData, clause string, label string) {
+	c.writeLine(clause)
+	c.emitExecuteGoto(rm, label)
+}
+
 // Emits code to unwind the capture stack until the crawl position specified in the provided local.
 func (c *converter) emitUncaptureUntil(capturepos string) {
 	c.writeLineFmt("r.UncaptureUntil(%s)", capturepos)
+}
+
+func (c *converter) emitStackPop(stackCookie int, args ...string) {
+	for _, arg := range args {
+		c.writeLineFmt("%v = r.StackPop()", arg)
+	}
+}
+
+func (c *converter) createStackCookie() int {
+	//TODO: this is a debug function should consider setting it up
+	return 0
+}
+
+// / <summary>
+// / Returns an expression that:
+// / In debug, pops item 1 from the backtracking stack, pops item 2 and validates it against the cookie, then evaluates to item1.
+// / In release, pops and evaluates to an item from the backtracking stack.
+// / </summary>
+func (c *converter) validateStackCookieWithAdditionAndReturnPoppedStack(stackCookie int) string {
+	// non-debug behavior
+	return "r.StackPop()"
+
+	/*#if DEBUG
+	                const string MethodName = "ValidateStackCookieWithAdditionAndReturnPoppedStack";
+	                if (!requiredHelpers.ContainsKey(MethodName))
+	                {
+	                    requiredHelpers.Add(MethodName,
+	                    [
+	                        $"/// <summary>Validates that a stack cookie popped off the backtracking stack holds the expected value. Debug only.</summary>",
+	                        $"internal static int {MethodName}(int poppedStack, int expectedCookie, int actualCookie)",
+	                        $"{{",
+	                        $"    expectedCookie += poppedStack;",
+	                        $"    if (expectedCookie != actualCookie)",
+	                        $"    {{",
+	                        $"          throw new Exception($\"Backtracking stack imbalance detected. Expected {{expectedCookie}}. Actual {{actualCookie}}.\");",
+	                        $"    }}",
+	                        $"    return poppedStack;",
+	                        $"}}",
+	                    ]);
+	                }
+
+	                return $"{HelpersTypeName}.{MethodName}({StackPop()}, {stackCookie}, {StackPop()})";
+	#else*/
+
+}
+
+/*
+#if DEBUG
+            /// <summary>Returns an expression that validates and returns a debug stack cookie.</summary>
+            string StackCookieValidate(int stackCookie)
+            {
+                const string MethodName = "ValidateStackCookie";
+                if (!requiredHelpers.ContainsKey(MethodName))
+                {
+                    requiredHelpers.Add(MethodName,
+                    [
+                        $"/// <summary>Validates that a stack cookie popped off the backtracking stack holds the expected value. Debug only.</summary>",
+                        $"internal static int {MethodName}(int expected, int actual)",
+                        $"{{",
+                        $"    if (expected != actual)",
+                        $"    {{",
+                        $"        throw new Exception($\"Backtracking stack imbalance detected. Expected {{expected}}. Actual {{actual}}.\");",
+                        $"    }}",
+                        $"    return actual;",
+                        $"}}",
+                    ]);
+                }
+
+                return $"{HelpersTypeName}.{MethodName}({stackCookie}, {StackPop()})";
+            }
+#endif
+*/
+
+func (c *converter) emitStackPush(stackCookie int, args ...string) {
+	switch len(args) {
+	case 1:
+		c.writeLineFmt("r.StackPush(%s)", args[0])
+	case 2:
+		c.writeLineFmt("r.StackPush2(%s, %s)", args[0], args[1])
+	case 3:
+		c.writeLineFmt("r.StackPush3(%s, %s, %s)", args[0], args[1], args[2])
+	}
+
+	c.writeLineFmt("r.StackPushN(%s)", strings.Join(args, ", "))
+	//TODO: stack cookie debugging
 }
 
 // Emits the sum of a constant and a value from a local.
@@ -596,6 +1463,13 @@ func sum(constant int, local *string) string {
 		return *local
 	}
 	return fmt.Sprintf("%v + %s", constant, local)
+}
+
+// Emits a check that the span is large enough at the currently known static position to handle the required additional length.
+func (c *converter) emitSpanLengthCheck(rm *regexpData, requiredLength int, dynamicRequiredLength *string) {
+	c.writeLineFmt("if %s {", spanLengthCheck(rm, requiredLength, dynamicRequiredLength))
+	c.emitExecuteGoto(rm, rm.doneLabel)
+	c.writeLine("}")
 }
 
 func spanLengthCheck(rm *regexpData, requiredLength int, dynamicRequiredLength *string) string {
@@ -641,7 +1515,7 @@ func (c *converter) sliceInputSpan(rm *regexpData, declare bool) {
 	if declare {
 		c.write("var ")
 	}
-	c.writeLineFmt("%s = r.Runslice[pos:]", rm.sliceSpan)
+	c.writeLineFmt("%s = r.Runtext[pos:]", rm.sliceSpan)
 }
 
 func (c *converter) emitTimeoutCheck() {
