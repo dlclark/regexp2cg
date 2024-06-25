@@ -107,10 +107,25 @@ type regexpData struct {
 	expressionHasCaptures bool
 	doneLabel             string
 
+	// track our labels since Go doesn't like unused labels, we need to find them and
+	// remove them as a post-process step
+	emittedLabels []string
+	usedLabels    []string
 	//TODO: timeout?
 	//TODO: string vs rune vs byte?
 }
 
+func (rm *regexpData) unusedLabels() []string {
+	var retval []string
+
+	for _, s := range rm.emittedLabels {
+		if !slices.Contains(rm.usedLabels, s) {
+			retval = append(retval, s)
+		}
+	}
+
+	return retval
+}
 func (rm *regexpData) addLocalDec(dec string) {
 	rm.additionalDeclarations = append(rm.additionalDeclarations, dec)
 }
@@ -121,12 +136,15 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	if err != nil {
 		return errors.Wrap(err, "error parsing regexp")
 	}
-
-	fmt.Printf("/*\n%s\n*/\n", tree.Dump())
-
 	if err := supportsCodeGen(tree); err != nil {
 		return errors.Wrap(err, "code generation not supported")
 	}
+
+	oldOut := c.out
+	buf := &bytes.Buffer{}
+	c.out = buf
+
+	c.writeLineFmt("/*\n%s\n*/", tree.Dump())
 
 	rm := &regexpData{
 		SourceLocation: sourceLocation,
@@ -145,7 +163,27 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	c.emitFindFirstChar(rm)
 	c.emitExecute(rm)
 
+	// get our string for final manipulation
+	output := buf.String()
+	c.out = oldOut
+
+	// finalize our code
+	removeUnusedLabels(&output, rm)
+
+	// write our temp out buffer into our saved buffer
+	c.out.Write([]byte(output))
+
 	return c.err
+}
+
+func removeUnusedLabels(output *string, rm *regexpData) {
+	unusedLabels := rm.unusedLabels()
+
+	// find and remove the unused labels in the output
+	for _, label := range unusedLabels {
+		// the label is on its own line with a colon at the end
+		*output = strings.ReplaceAll(*output, "\n"+label+":\n", "\n")
+	}
 }
 
 func (c *converter) emitRegexStart(rm *regexpData) {
@@ -162,6 +200,8 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 		func (MyPattern0_Engine) CapSize() int             { return 1 }
 	*/
 	caps, capsize := getCaps(rm.Tree)
+	rm.Tree.Caps = caps
+	rm.Tree.Captop = capsize
 
 	c.writeLineFmt("// From %s", rm.SourceLocation)
 	c.writeLineFmt("// Pattern: %s", rm.Pattern)

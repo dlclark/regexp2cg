@@ -510,7 +510,7 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 		} else {
 			c.writeLineFmt(`i := %v
 						if i >= 0 {
-							r.Runtextpos = pos+1
+							r.Runtextpos = pos+i
 							return true
 						}
 						`, indexOf)
@@ -805,9 +805,9 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 			return fmt.Sprintf("(%v == %q)", chExpr, r.First)
 		}
 		if negate {
-			return fmt.Sprintf("!helper.IsBetween(%s, %q, %q)", chExpr, r.First, r.Last)
+			return fmt.Sprintf("!helpers.IsBetween(%s, %q, %q)", chExpr, r.First, r.Last)
 		}
-		return fmt.Sprintf("helper.IsBetween(%s, %q, %q)", chExpr, r.First, r.Last)
+		return fmt.Sprintf("helpers.IsBetween(%s, %q, %q)", chExpr, r.First, r.Last)
 	}
 
 	// Next, if the character class contains nothing but Unicode categories, we can call char.GetUnicodeCategory and
