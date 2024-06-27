@@ -11,7 +11,7 @@
             "request": "launch",
             "mode": "debug",
             "program": ".",
-            "args": ["-expr", "(A|B)*CD"]
+            "args": ["-expr", "(?i:saturday|sunday)"]
         }
     ]
 }

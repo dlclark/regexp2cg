@@ -318,6 +318,7 @@ func isAscii(chars []rune) bool {
 	}
 	return true
 }
+
 func (c *converter) emitIndexOfChars(chars []rune, negate bool, spanName string) string {
 	// We have a chars array, so we can use IndexOf{Any}{Except} to search for it. Choose the best overload.
 	// 1, 2, 3 have dedicated optimized IndexOfAny overloads

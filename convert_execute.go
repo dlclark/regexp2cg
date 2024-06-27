@@ -318,7 +318,8 @@ func (c *converter) emitExecuteAtomic(rm *regexpData, node *syntax.RegexNode, su
 	// see any label left set by the atomic's child.  We also need to reset the backtracking stack position
 	// so that the state on the stack remains consistent.
 	originalDoneLabel := rm.doneLabel
-	rm.additionalDeclarations = append(rm.additionalDeclarations, "stackpos := 0")
+	//TODO: do we need this?
+	rm.addLocalDec("stackpos := 0")
 	startingStackpos := rm.reserveName("atomic_stackpos")
 	c.writeLineFmt("%s = stackpos\n", startingStackpos)
 
@@ -379,8 +380,8 @@ func (c *converter) emitExecuteConcatenation(rm *regexpData, node *syntax.RegexN
 						if rm.sliceStaticPos > 0 {
 							sourceSpan = fmt.Sprintf("%s[%v:]", rm.sliceSpan, rm.sliceStaticPos)
 						}
-						c.write(fmt.Sprintf("!helpers.StartsWithIgnoreCase(%s, %s)", sourceSpan, caseInsensitiveString))
-						desc := fmt.Sprintf("Match the string %#v (ordinal case-insensitive)", caseInsensitiveString)
+						c.write(fmt.Sprintf("!helpers.StartsWithIgnoreCase(%s, %s)", sourceSpan, getRuneSliceLiteral(strings.ToLower(caseInsensitiveString))))
+						desc := fmt.Sprintf("Match the string %#v (case-insensitive)", caseInsensitiveString)
 						prevDescription = &desc
 						wroteClauses = true
 
@@ -562,7 +563,7 @@ func (c *converter) emitExecuteSingleCharLoop(rm *regexpData, node *syntax.Regex
 	endLoop := rm.reserveName("CharLoopEnd")
 	startingPos := rm.reserveName("charloop_starting_pos")
 	endingPos := rm.reserveName("charloop_ending_pos")
-	rm.additionalDeclarations = append(rm.additionalDeclarations, fmt.Sprintf("var %s, %s = 0, 0", startingPos, endingPos))
+	rm.addLocalDec(fmt.Sprintf("var %s, %s = 0, 0", startingPos, endingPos))
 	rtl := node.Options&syntax.RightToLeft != 0
 	isInLoop := rm.Analysis.IsInLoop(node)
 
@@ -608,7 +609,7 @@ func (c *converter) emitExecuteSingleCharLoop(rm *regexpData, node *syntax.Regex
 		// Since we're not in a loop, we're using a local to track the crawl position.
 		// Unwind back to the position we were at prior to running the code after this loop.
 		capturePos = rm.reserveName("charloop_capture_pos")
-		rm.additionalDeclarations = append(rm.additionalDeclarations, "%s := 0", capturePos)
+		rm.addLocalDec(fmt.Sprintf("%s := 0", capturePos))
 		c.emitUncaptureUntil(capturePos)
 	}
 	c.writeLine("")
@@ -694,6 +695,7 @@ func (c *converter) emitMarkLabel(rm *regexpData, label string) {
 
 // emitLengthChecksIfRequired=true
 func (c *converter) emitExecuteSingleCharLazy(rm *regexpData, node *syntax.RegexNode, subsequent *syntax.RegexNode, emitLengthChecksIfRequired bool) {
+
 }
 
 // Emits the code to handle a non-backtracking, variable-length loop around a single character comparison.
@@ -838,7 +840,99 @@ func countIsLessThan(count string, exclusiveUpper int) string {
 	return fmt.Sprintf("%s < %v", count, exclusiveUpper)
 }
 
-func (c *converter) emitExecuteSingleCharRepeater(rm *regexpData, node *syntax.RegexNode, emitLengthChecksIfRequired bool) {
+// Gets a comparison for whether the iteration count is greater than or equal to the upper bound
+func countIsGreaterThanOrEqualTo(count string, exclusiveUpper int) string {
+	if exclusiveUpper == 1 {
+		return count + " != 0"
+	}
+	return fmt.Sprintf("%s >= %v", count, exclusiveUpper)
+}
+
+// emitLengthCheck=true
+func (c *converter) emitExecuteSingleCharRepeater(rm *regexpData, node *syntax.RegexNode, emitLengthCheck bool) {
+	iterations := node.M
+	rtl := node.Options&syntax.RightToLeft != 0
+
+	// No iterations, nothing to do.
+	if iterations == 0 {
+		return
+	}
+	// Just match the individual item
+	if iterations == 1 {
+		c.emitExecuteSingleChar(rm, node, emitLengthCheck, nil, false)
+		return
+	}
+	if iterations < syntax.MultiVsRepeaterLimit && node.IsOneFamily() {
+		// This is a repeated case-sensitive character; emit it as a multi in order to get all the optimizations
+		// afforded to a multi, e.g. unrolling the loop with multi-char reads/comparisons at a time.
+		c.emitExecuteMultiCharString(rm, []rune(strings.Repeat(string(node.Ch), iterations)), emitLengthCheck, false, rtl)
+		return
+	}
+
+	if rtl {
+		c.transferSliceStaticPosToPos(rm, false) // we don't use static position with rtl
+		c.writeLineFmt("for i:=0; i < %v; i++ {", iterations)
+		c.emitExecuteSingleChar(rm, node, true, nil, false)
+		c.writeLine("}")
+	} else if node.IsSetFamily() && node.Set.IsAnything() {
+		// This is a repeater for anything, which means we only care about length and can jump past that length.
+		if emitLengthCheck {
+			c.emitSpanLengthCheck(rm, iterations, nil)
+		}
+		rm.sliceStaticPos += iterations
+	} else if iterations <= MaxUnrollSize {
+		// if ((uint)(sliceStaticPos + iterations - 1) >= (uint)slice.Length ||
+		//     slice[sliceStaticPos] != c1 ||
+		//     slice[sliceStaticPos + 1] != c2 ||
+		//     ...)
+		// {
+		//     goto doneLabel;
+		// }
+		c.write("if ")
+		if emitLengthCheck {
+			c.write(spanLengthCheck(rm, iterations, nil))
+			c.writeLine(" ||")
+		}
+		c.emitExecuteSingleChar(rm, node, false, nil, true)
+		for i := 1; i < iterations; i++ {
+			c.writeLine(" ||")
+			c.emitExecuteSingleChar(rm, node, false, nil, true)
+		}
+		c.writeLine(" {")
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}")
+	} else {
+		// if ((uint)(sliceStaticPos + iterations - 1) >= (uint)slice.Length) goto doneLabel;
+		if emitLengthCheck {
+			c.emitSpanLengthCheck(rm, iterations, nil)
+			c.writeLine("")
+		}
+
+		// If we're able to vectorize the search, do so. Otherwise, fall back to a loop.
+		// For the loop, we're validating that each char matches the target node.
+		// For IndexOf, we're looking for the first thing that _doesn't_ match the target node,
+		// and thus similarly validating that everything does.
+		sliceName := fmt.Sprintf("%s[%v:%v]", rm.sliceSpan, rm.sliceStaticPos, rm.sliceStaticPos+iterations)
+		var indexOfExpr string
+		if c.tryEmitExecuteIndexOf(rm, node, sliceName, false, true, new(int), &indexOfExpr) {
+			c.writeLineFmt("if %s >= 0 {", indexOfExpr)
+			c.emitExecuteGoto(rm, rm.doneLabel)
+			c.writeLine("}")
+		} else {
+			repeaterSpan := "repeaterSlice" // As this repeater doesn't wrap arbitrary node emits, this shouldn't conflict with anything
+			c.writeLineFmt(`%s := %s
+						 for i:=0; i < len(%[1]s); i++ {`, repeaterSpan, sliceName)
+			tmpTextSpanLocal, tmpSliceStaticPos := rm.sliceSpan, rm.sliceStaticPos
+			rm.sliceSpan = repeaterSpan
+			rm.sliceStaticPos = 0
+			i := "i"
+			c.emitExecuteSingleChar(rm, node, false, &i, false)
+			rm.sliceSpan = tmpTextSpanLocal
+			rm.sliceStaticPos = tmpSliceStaticPos
+		}
+
+		rm.sliceStaticPos += iterations
+	}
 }
 
 // Emits the code to handle a non-backtracking optional zero-or-one loop.
@@ -883,6 +977,8 @@ func (c *converter) emitExecuteAtomicSingleCharZeroOrOne(rm *regexpData, node *s
 }
 
 func (c *converter) emitTimeoutCheckIfNeeded(rm *regexpData) {
+	// we just always write it for now
+	c.emitTimeoutCheck()
 }
 
 // tries to create an indexof call for a node
@@ -1007,7 +1103,28 @@ func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 		c.writeLine("}")
 	}
 }
+
+// Emits the code to handle a boundary check on a character.
 func (c *converter) emitExecuteBoundary(rm *regexpData, node *syntax.RegexNode) {
+	var call string
+	switch node.T {
+	case syntax.NtBoundary:
+		call = "!r.IsBoundary"
+	case syntax.NtNonboundary:
+		call = "r.IsBoundary"
+	case syntax.NtECMABoundary:
+		call = "!r.IsECMABoundary"
+	case syntax.NtNonECMABoundary:
+		call = "r.IsECMABoundary"
+	}
+
+	end := ""
+	if rm.sliceStaticPos > 0 {
+		end = fmt.Sprint(" + ", rm.sliceStaticPos)
+	}
+	c.writeLineFmt("if %s(pos%s) {", call, end)
+	c.emitExecuteGoto(rm, rm.doneLabel)
+	c.writeLineFmt("}")
 }
 
 func (c *converter) emitExecuteNonBacktrackingRepeater(rm *regexpData, node *syntax.RegexNode) {
@@ -1341,7 +1458,298 @@ func (c *converter) emitExecuteLoop(rm *regexpData, node *syntax.RegexNode) {
 		}
 	}
 }
+
 func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
+	child := node.Children[0]
+	minIterations := node.M
+	maxIterations := node.N
+	originalDoneLabel := rm.doneLabel
+
+	// If this is actually a repeater, reuse the loop implementation, as a loop and a lazy loop
+	// both need to greedily consume up to their min iteration count and are identical in
+	// behavior when min == max.
+	if minIterations == maxIterations {
+		c.emitExecuteLoop(rm, node)
+		return
+	}
+
+	// We should only be here if the lazy loop isn't atomic due to an ancestor, as the optimizer should
+	// in such a case have lowered the loop's upper bound to its lower bound, at which point it would
+	// have been handled by the above delegation to EmitLoop.  However, if the optimizer missed doing so,
+	// this loop could still be considered atomic by ancestor by its parent nodes, in which case we want
+	// to make sure the code emitted here conforms (e.g. doesn't leave any state erroneously on the stack).
+	// So, we assert it's not atomic, but still handle that case.
+	isAtomic := rm.Analysis.IsAtomicByAncestor(node)
+
+	// We might loop any number of times.  In order to ensure this loop and subsequent code sees sliceStaticPos
+	// the same regardless, we always need it to contain the same value, and the easiest such value is 0.
+	// So, we transfer sliceStaticPos to pos, and ensure that any path out of here has sliceStaticPos as 0.
+	c.transferSliceStaticPosToPos(rm, false)
+
+	body := rm.reserveName("LazyLoopBody")
+	endLoop := rm.reserveName("LazyLoopEnd")
+
+	iterationCount := rm.reserveName("lazyloop_iteration")
+	rm.addLocalDec(fmt.Sprint(iterationCount, " := 0"))
+	c.writeLineFmt("%s = 0", iterationCount)
+
+	// Loops that match empty iterations need additional checks in place to prevent infinitely matching (since
+	// you could end up looping an infinite number of times at the same location).  We can avoid those
+	// additional checks if we can prove that the loop can never match empty, which we can do by computing
+	// the minimum length of the child; only if it's 0 might iterations be empty.
+	iterationMayBeEmpty := child.ComputeMinLength() == 0
+	var startingPos, sawEmpty string
+	if iterationMayBeEmpty {
+		startingPos = rm.reserveName("lazyloop_starting_pos")
+		sawEmpty = rm.reserveName("lazyloop_empty_seen")
+		c.writeLineFmt("%s, %s := pos, 0 // the lazy loop may match empty iterations", startingPos, sawEmpty)
+	}
+
+	// If the min count is 0, start out by jumping right to what's after the loop.  Backtracking
+	// will then bring us back in to do further iterations.
+	if minIterations == 0 {
+		c.emitExecuteGoto(rm, endLoop)
+	}
+	c.writeLine("")
+
+	// Iteration body
+	c.emitMarkLabel(rm, body)
+
+	// In case iterations are backtracked through and unwound, we need to store the current position (so that
+	// matching can resume from that location), the current crawl position if captures are possible (so that
+	// we can uncapture back to that position), and both the starting position from the iteration we're leaving
+	// and whether we've seen an empty iteration (if iterations may be empty).  Since there can be multiple
+	// iterations, this state needs to be stored on to the backtracking stack.
+	if !isAtomic {
+		stackCookie := c.createStackCookie()
+		entriesPerIteration := 1 //pos
+		if iterationMayBeEmpty {
+			entriesPerIteration += 2 //startingPos+sawEmpty
+		}
+		if rm.expressionHasCaptures {
+			entriesPerIteration += 1 //Crawlpos
+		}
+		if stackCookie != 0 {
+			entriesPerIteration += 1
+		}
+		args := []string{"pos"}
+		if iterationMayBeEmpty {
+			args = append(args, startingPos, sawEmpty)
+		}
+		if rm.expressionHasCaptures {
+			args = append(args, "r.Crawlpos()")
+		}
+		c.emitStackPush(stackCookie, args...)
+
+		if iterationMayBeEmpty {
+			// We need to store the current pos so we can compare it against pos after the iteration, in order to
+			// determine whether the iteration was empty.
+			c.writeLineFmt("%s = pos", startingPos)
+		}
+
+		// Proactively increase the number of iterations.  We do this prior to the match rather than once
+		// we know it's successful, because we need to decrement it as part of a failed match when
+		// backtracking; it's thus simpler to just always decrement it as part of a failed match, even
+		// when initially greedily matching the loop, which then requires we increment it before trying.
+		c.writeLineFmt("%s++", iterationCount)
+
+		// Last but not least, we need to set the doneLabel that a failed match of the body will jump to.
+		// Such an iteration match failure may or may not fail the whole operation, depending on whether
+		// we've already matched the minimum required iterations, so we need to jump to a location that
+		// will make that determination.
+		iterationFailedLabel := rm.reserveName("LazyLoopIterationNoMatch")
+		rm.doneLabel = iterationFailedLabel
+
+		// Finally, emit the child.
+		c.writeLine("")
+		c.emitExecuteNode(rm, child, nil, true)
+		c.writeLine("")
+		c.transferSliceStaticPosToPos(rm, false) // ensure sliceStaticPos remains 0
+		if rm.doneLabel == iterationFailedLabel {
+			rm.doneLabel = originalDoneLabel
+		}
+
+		// Loop condition.  Continue iterating if we've not yet reached the minimum.  We just successfully
+		// matched an iteration, so the only reason we'd need to forcefully loop around again is if the
+		// minimum were at least 2.
+		if minIterations >= 2 {
+			c.writeLineFmt("// The lazy loop requires a minimum of %v iterations. If that many haven't yet matched, loop now.", minIterations)
+			c.writeLineFmt("if %s {", countIsLessThan(iterationCount, minIterations))
+			c.emitExecuteGoto(rm, body)
+			c.writeLine("}")
+		}
+
+		if iterationMayBeEmpty {
+			// If the last iteration was empty, we need to prevent further iteration from this point
+			// unless we backtrack out of this iteration.
+			c.writeLineFmt(`// If the iteration successfully matched zero-length input, record that an empty iteration was seen.
+						if pos == %s {
+							%s = 1 // true
+						}
+						`, startingPos, sawEmpty)
+		}
+
+		// We matched the next iteration.  Jump to the subsequent code.
+		c.emitExecuteGoto(rm, endLoop)
+		c.writeLine("")
+
+		// Now handle what happens when an iteration fails (and since a lazy loop only executes an iteration
+		// when it's required to satisfy the loop by definition of being lazy, the loop is failing).  We need
+		// to reset state to what it was before just that iteration started.  That includes resetting pos and
+		// clearing out any captures from that iteration.
+		c.writeLine("// The lazy loop iteration failed to match.")
+		c.emitMarkLabel(rm, iterationFailedLabel)
+
+		// we don't need to back anything out if we're about to exit TryMatchAtCurrentPosition anyway.
+		if rm.doneLabel != originalDoneLabel || !gotoWillExitMatch(rm, originalDoneLabel) {
+			// Fail this loop iteration, including popping state off the backtracking stack that was pushed
+			// on as part of the failing iteration.
+			c.writeLineFmt("%s--", iterationCount)
+			if rm.expressionHasCaptures {
+				c.emitUncaptureUntil("r.StackPop()")
+			}
+			args := []string{"pos"}
+			if iterationMayBeEmpty {
+				args = append(args, sawEmpty, startingPos)
+			}
+
+			c.emitStackPop(stackCookie, args...)
+			c.sliceInputSpan(rm, false)
+
+			// If the loop's child doesn't backtrack, then this loop has failed.
+			// If the loop's child does backtrack, we need to backtrack back into the previous iteration if there was one.
+			if rm.doneLabel == originalDoneLabel {
+				// Since the only reason we'd end up revisiting previous iterations of the lazy loop is if the child had backtracking constructs
+				// we'd backtrack into, and the child doesn't, the whole loop is failed and done. If we successfully processed any iterations,
+				// we thus need to pop all of the state we pushed onto the stack for those iterations, as we're exiting out to the parent who
+				// will expect the stack to be cleared of any child state.
+				if entriesPerIteration > 1 {
+					c.writeLineFmt("stackpos -= %s * %v", iterationCount, entriesPerIteration)
+				} else {
+					c.writeLineFmt("stackpos -= %s", iterationCount)
+				}
+			} else {
+				// The child has backtracking constructs.  If we have no successful iterations previously processed, just bail.
+				// If we do have successful iterations previously processed, however, we need to backtrack back into the last one.
+				c.writeLineFmt("if %s > 0 {", iterationCount)
+				c.writeLine("// The lazy loop matched at least one iteration; backtrack into the last one.")
+				if iterationMayBeEmpty {
+					// If we saw empty, it must have been in the most recent iteration, as we wouldn't have
+					// allowed additional iterations after one that was empty.  Thus, we reset it back to
+					// false prior to backtracking / undoing that iteration.
+					c.writeLineFmt("%s = 0 // false", sawEmpty)
+				}
+				c.emitExecuteGoto(rm, rm.doneLabel)
+				c.writeLine("}\n")
+			}
+		}
+		c.emitExecuteGoto(rm, originalDoneLabel)
+		c.writeLine("")
+
+		c.emitMarkLabel(rm, endLoop)
+
+		// If the lazy loop is not atomic, then subsequent code may backtrack back into this lazy loop, either
+		// causing it to add additional iterations, or backtracking into existing iterations and potentially
+		// unwinding them.  We need to do a timeout check, and then determine whether to branch back to add more
+		// iterations (if we haven't hit the loop's maximum iteration count and haven't seen an empty iteration)
+		// or unwind by branching back to the last backtracking location.  Either way, we need a dedicated
+		// backtracking section that a subsequent construct will see as its backtracking target.
+
+		// We need to ensure that some state (e.g. iteration count) is persisted if we're backtracked to.
+		// We also need to push the current position, so that subsequent iterations pick up at the right
+		// point (and subsequent expressions are almost certain to have changed the current pos). However,
+		// if we're not inside of a loop, the other local's used for this construct are sufficient, as nothing
+		// else will overwrite them between now and when backtracking occurs.  If, however, we are inside
+		// of another loop, then any number of iterations might have such state that needs to be stored,
+		// and thus it needs to be pushed on to the backtracking stack.
+		isInLoop := rm.Analysis.IsInLoop(node)
+		stackCookie = c.createStackCookie()
+		args = []string{"pos"}
+		if isInLoop {
+			args = append(args, iterationCount)
+			if iterationMayBeEmpty {
+				args = append(args, startingPos, sawEmpty)
+			}
+		}
+		if rm.expressionHasCaptures {
+			args = append(args, "r.Crawlpos()")
+		}
+		c.emitStackPush(stackCookie, args...)
+
+		skipBacktrack := rm.reserveName("LazyLoopSkipBacktrack")
+		c.emitExecuteGoto(rm, skipBacktrack)
+		c.writeLine("")
+
+		// Emit a backtracking section that checks the timeout, restores the loop's state, and jumps to
+		// the appropriate label.
+		backtrack := rm.reserveName("LazyLoopBacktrack")
+		c.emitMarkLabel(rm, backtrack)
+
+		// We're backtracking.  Check the timeout.
+		c.emitTimeoutCheckIfNeeded(rm)
+
+		if rm.expressionHasCaptures {
+			c.emitUncaptureUntil("StackPop()")
+		}
+		if !isInLoop {
+			args = []string{"pos"}
+		} else if iterationMayBeEmpty {
+			args = []string{sawEmpty, startingPos, iterationCount, "pos"}
+		} else {
+			args = []string{iterationCount, "pos"}
+		}
+		c.emitStackPop(stackCookie, args...)
+		c.sliceInputSpan(rm, false)
+
+		// Determine where to branch, either back to the lazy loop body to add an additional iteration,
+		// or to the last backtracking label.
+		if maxIterations != math.MaxInt32 || iterationMayBeEmpty {
+			c.writeLine("")
+			if maxIterations == math.MaxInt32 {
+				// If the last iteration matched empty, backtrack.
+				c.writeLineFmt(`// If the last iteration matched empty, don't continue lazily iterating. Instead, backtrack.
+							if %s != 0 {`, sawEmpty)
+			} else if iterationMayBeEmpty {
+				// If the last iteration matched empty or if we've reached our upper bound, backtrack.
+				c.writeLineFmt(`// If the upper bound %v has already been reached, or if the last
+							// iteration matched empty, don't continue lazily iterating. Instead, backtrack.
+							if %s || %s != 0 {`, maxIterations, countIsGreaterThanOrEqualTo(iterationCount, maxIterations), sawEmpty)
+			} else {
+				// If we've reached our upper bound, backtrack.
+				c.writeLineFmt(`// If the upper bound %v has already been reached,
+							// don't continue lazily iterating. Instead, backtrack.
+							if %s {`, maxIterations, countIsGreaterThanOrEqualTo(iterationCount, maxIterations))
+			}
+
+			// We're backtracking, which could either be to something prior to the lazy loop or to something
+			// inside of the lazy loop.  If it's to something inside of the lazy loop, then either the loop
+			// will eventually succeed or we'll eventually end up unwinding back through the iterations all
+			// the way back to the loop not matching at all, in which case the state we first pushed on at the
+			// beginning of the !isAtomic section will get popped off. But if here we're instead going to jump
+			// to something prior to the lazy loop, then we need to pop off that state here.
+			if rm.doneLabel == originalDoneLabel {
+				c.emitAddStmt("stackpos", -entriesPerIteration)
+			}
+
+			if iterationMayBeEmpty {
+				// If we saw empty, it must have been in the most recent iteration, as we wouldn't have
+				// allowed additional iterations after one that was empty.  Thus, we reset it back to
+				// false prior to backtracking / undoing that iteration.
+				c.writeLineFmt("%s = 0 // false", sawEmpty)
+			}
+
+			c.emitExecuteGoto(rm, rm.doneLabel)
+
+			c.writeLine("}")
+		}
+
+		// Otherwise, try to match another iteration.
+		c.emitExecuteGoto(rm, body)
+		c.writeLine("")
+
+		rm.doneLabel = backtrack
+		c.emitMarkLabel(rm, skipBacktrack)
+	}
 }
 
 // arbitrary limit; we want it to be large enough to handle ignore-case of common sets, like hex, the latin alphabet, etc.
@@ -1625,9 +2033,9 @@ func (c *converter) emitExecuteAlternation(rm *regexpData, node *syntax.RegexNod
 				// the relevant state is stored in our locals.
 				if len(currentBranch) == 0 {
 					if len(startingCapturePos) != 0 {
-						c.emitStackPush(stackCookie+i, string(i), startingPos, startingCapturePos)
+						c.emitStackPush(stackCookie+i, strconv.Itoa(i), startingPos, startingCapturePos)
 					} else {
-						c.emitStackPush(stackCookie+i, string(i), startingPos)
+						c.emitStackPush(stackCookie+i, strconv.Itoa(i), startingPos)
 					}
 				} else {
 					c.writeLineFmt("%s = %v", currentBranch, i)
@@ -1712,11 +2120,359 @@ func (c *converter) emitExecuteAlternation(rm *regexpData, node *syntax.RegexNod
 }
 
 func (c *converter) emitExecuteBackreference(rm *regexpData, node *syntax.RegexNode) {
+	capnum := mapCaptureNumber(node.M, rm.Tree.Caps)
+
+	if rm.sliceStaticPos > 0 {
+		c.transferSliceStaticPosToPos(rm, false)
+		c.writeLine("")
+	}
+
+	// If the specified capture hasn't yet captured anything, fail to match... except when using RegexOptions.ECMAScript,
+	// in which case per ECMA 262 section 21.2.2.9 the backreference should succeed.
+	if (node.Options & syntax.ECMAScript) != 0 {
+		c.writeLineFmt(`// If the %s hasn't matched, the backreference matches with RegexOptions.ECMAScript rules.
+					if r.IsMatched(%v) {`, describeCapture(rm, node.M), capnum)
+		c.emitBackrefWhenHasCapture(rm, node, capnum)
+		c.writeLine("}")
+	} else {
+		c.writeLineFmt(`// If the %s hasn't matched, the backreference doesn't match.
+					if !r.IsMatched(%v) {`, describeCapture(rm, node.M), capnum)
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}\n")
+		c.emitBackrefWhenHasCapture(rm, node, capnum)
+	}
 }
+
+func (c *converter) emitBackrefWhenHasCapture(rm *regexpData, node *syntax.RegexNode, capnum int) {
+	c.writeLine("// Get the captured text.  If it doesn't match at the current position, the backreference doesn't match.")
+	rm.addLocalDec("matchLength := 0")
+	c.writeLineFmt("matchLength = r.MatchLength(%v)", capnum)
+
+	// Validate that the remaining length of the slice is sufficient
+	// to possibly match, and then do a SequenceEqual against the matched text.
+	if (node.Options & syntax.RightToLeft) == 0 {
+		c.writeLineFmt("if len(%s) < matchLength || !helpers.Equals(r.Runtext, r.MatchIndex(%v), matchLength, %[1]s[:matchLength]) {",
+			rm.sliceSpan, capnum)
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}\npos += matchLength")
+	} else {
+		c.writeLineFmt("if pos < matchLength || !helpers.Equals(r.Runtext, r.MatchIndex(%v), matchLength, r.Runtext[pos-matchLength:pos]) {",
+			capnum)
+		c.emitExecuteGoto(rm, rm.doneLabel)
+		c.writeLine("}\npos -= matchLength")
+	}
+	c.sliceInputSpan(rm, false)
+}
+
+// Emits the code for an if(backreference)-then-else conditional.
 func (c *converter) emitExecuteBackreferenceConditional(rm *regexpData, node *syntax.RegexNode) {
+	// We're branching in a complicated fashion.  Make sure sliceStaticPos is 0.
+	c.transferSliceStaticPosToPos(rm, false)
+	stackCookie := c.createStackCookie()
+
+	// Get the capture number to test.
+	capnum := mapCaptureNumber(node.M, rm.Tree.Caps)
+
+	// Get the "yes" branch and the "no" branch.  The "no" branch is optional in syntax and is thus
+	// somewhat likely to be Empty.
+	yesBranch := node.Children[0]
+	var noBranch *syntax.RegexNode
+	if len(node.Children) > 1 && node.Children[1].T != syntax.NtEmpty {
+		noBranch = node.Children[1]
+	}
+	originalDoneLabel := rm.doneLabel
+
+	// If the child branches might backtrack, we can't emit the branches inside constructs that
+	// require braces, e.g. if/else, even though that would yield more idiomatic output.
+	// But if we know for certain they won't backtrack, we can output the nicer code.
+	if rm.Analysis.IsAtomicByAncestor(node) || (!rm.Analysis.MayBacktrack(yesBranch) && (noBranch == nil || !rm.Analysis.MayBacktrack(noBranch))) {
+		c.writeLineFmt(`if r.IsMatched(%v) {
+		// The %s captured a value.  Match the first branch.")`, capnum, describeCapture(rm, node.M))
+		c.emitExecuteNode(rm, yesBranch, nil, true)
+		c.writeLine("")
+		c.transferSliceStaticPosToPos(rm, false) // make sure sliceStaticPos is 0 after each branch
+
+		if noBranch != nil {
+			c.writeLine("} else {")
+			c.writeLine("// Otherwise, match the second branch.")
+			c.emitExecuteNode(rm, noBranch, nil, true)
+			c.writeLine("")
+			c.transferSliceStaticPosToPos(rm, false)
+		}
+		c.writeLine("}")
+
+		rm.doneLabel = originalDoneLabel // atomicity
+		return
+	}
+
+	refNotMatched := rm.reserveName("ConditionalBackreferenceNotMatched")
+	endConditional := rm.reserveName("ConditionalBackreferenceEnd")
+
+	// As with alternations, we have potentially multiple branches, each of which may contain
+	// backtracking constructs, but the expression after the conditional needs a single target
+	// to backtrack to.  So, we expose a single Backtrack label and track which branch was
+	// followed in this resumeAt local.
+	resumeAt := rm.reserveName("conditionalbackreference_branch")
+	isInLoop := rm.Analysis.IsInLoop(node)
+	if isInLoop {
+		c.writeLineFmt("var %s int", resumeAt)
+	} else {
+		rm.addLocalDec(fmt.Sprint(resumeAt, " := 0"))
+	}
+
+	// While it would be nicely readable to use an if/else block, if the branches contain
+	// anything that triggers backtracking, labels will end up being defined, and if they're
+	// inside the scope block for the if or else, that will prevent jumping to them from
+	// elsewhere.  So we implement the if/else with labels and gotos manually.
+	// Check to see if the specified capture number was captured.
+	c.writeLineFmt("if !rm.IsMatched(%v) {", capnum)
+	c.emitExecuteGoto(rm, refNotMatched)
+	c.writeLine("}\n")
+
+	// The specified capture was captured.  Run the "yes" branch.
+	// If it successfully matches, jump to the end.
+	c.emitExecuteNode(rm, yesBranch, nil, false)
+	c.writeLine("")
+	c.transferSliceStaticPosToPos(rm, false) // make sure sliceStaticPos is 0 after each branch
+	postYesDoneLabel := rm.doneLabel
+	if postYesDoneLabel != originalDoneLabel || isInLoop {
+		c.writeLineFmt("%s = 0", resumeAt)
+	}
+
+	needsEndConditional := postYesDoneLabel != originalDoneLabel || noBranch != nil
+	if needsEndConditional {
+		c.emitExecuteGoto(rm, endConditional)
+		c.writeLine("")
+	}
+
+	c.emitMarkLabel(rm, refNotMatched)
+	postNoDoneLabel := originalDoneLabel
+	if noBranch != nil {
+		// Output the no branch.
+		rm.doneLabel = originalDoneLabel
+		c.emitExecuteNode(rm, noBranch, nil, true)
+		c.writeLine("")
+		c.transferSliceStaticPosToPos(rm, false) // make sure sliceStaticPos is 0 after each branch
+		postNoDoneLabel = rm.doneLabel
+		if postNoDoneLabel != originalDoneLabel || isInLoop {
+			c.writeLineFmt("%s = 1", resumeAt)
+		}
+	} else {
+		// There's only a yes branch.  If it's going to cause us to output a backtracking
+		// label but code may not end up taking the yes branch path, we need to emit a resumeAt
+		// that will cause the backtracking to immediately pass through this node.
+		if postYesDoneLabel != originalDoneLabel || isInLoop {
+			c.writeLineFmt("%s = 2", resumeAt)
+		}
+	}
+
+	// If either the yes branch or the no branch contained backtracking, subsequent expressions
+	// might try to backtrack to here, so output a backtracking map based on resumeAt.
+	hasBacktracking := postYesDoneLabel != originalDoneLabel || postNoDoneLabel != originalDoneLabel
+	if hasBacktracking {
+		// Skip the backtracking section.
+		c.emitExecuteGoto(rm, endConditional)
+		c.writeLine("")
+
+		// Backtrack section
+		backtrack := rm.reserveName("ConditionalBackreferenceBacktrack")
+		rm.doneLabel = backtrack
+		c.emitMarkLabel(rm, backtrack)
+
+		// Pop from the stack the branch that was used and jump back to its backtracking location.
+		// If we're not in a loop, though, we won't have pushed it on to the stack as nothing will
+		// have been able to overwrite it in the interim, so we can just trust the value already in
+		// the local.
+		if isInLoop {
+			c.emitStackPop(stackCookie, resumeAt)
+		}
+		c.writeLineFmt("switch %s {", resumeAt)
+		if postYesDoneLabel != originalDoneLabel {
+			c.emitCaseGoto(rm, "case 0:", postYesDoneLabel)
+		}
+		if postNoDoneLabel != originalDoneLabel {
+			c.emitCaseGoto(rm, "case 1:", postNoDoneLabel)
+		}
+
+		c.emitCaseGoto(rm, "default:", originalDoneLabel)
+		c.writeLine("}")
+	}
+
+	if needsEndConditional {
+		c.emitMarkLabel(rm, endConditional)
+	}
+
+	if hasBacktracking && isInLoop {
+		// We're not atomic and at least one of the yes or no branches contained backtracking constructs,
+		// so finish outputting our backtracking logic, which involves pushing onto the stack which
+		// branch to backtrack into.  If we're not in a loop, though, nothing else can overwrite this local
+		// in the interim, so we can avoid pushing it.
+		c.emitStackPush(stackCookie, resumeAt)
+	}
 }
+
+// Emits the code for an if(expression)-then-else conditional.
 func (c *converter) emitExecuteExpressionConditional(rm *regexpData, node *syntax.RegexNode) {
+	isAtomic := rm.Analysis.IsAtomicByAncestor(node)
+
+	// We're branching in a complicated fashion.  Make sure sliceStaticPos is 0.
+	c.transferSliceStaticPosToPos(rm, false)
+
+	// The first child node is the condition expression.  If this matches, then we branch to the "yes" branch.
+	// If it doesn't match, then we branch to the optional "no" branch if it exists, or simply skip the "yes"
+	// branch, otherwise. The condition is treated as a positive lookaround.
+	condition := node.Children[0]
+
+	// Get the "yes" branch and the "no" branch.  The "no" branch is optional in syntax and is thus
+	// somewhat likely to be Empty.
+	yesBranch := node.Children[1]
+	var noBranch *syntax.RegexNode
+	if len(node.Children) > 2 && node.Children[2].T != syntax.NtEmpty {
+		noBranch = node.Children[2]
+	}
+	originalDoneLabel := rm.doneLabel
+
+	expressionNotMatched := rm.reserveName("ConditionalExpressionNotMatched")
+	endConditional := rm.reserveName("ConditionalExpressionEnd")
+
+	// As with alternations, we have potentially multiple branches, each of which may contain
+	// backtracking constructs, but the expression after the condition needs a single target
+	// to backtrack to.  So, we expose a single Backtrack label and track which branch was
+	// followed in this resumeAt local.
+	isInLoop := false
+	resumeAt := rm.reserveName("conditionalexpression_branch")
+	if !isAtomic {
+		isInLoop = rm.Analysis.IsInLoop(node)
+		if isInLoop {
+			c.writeLineFmt("%v := 0", resumeAt)
+		} else {
+			rm.addLocalDec(fmt.Sprint(resumeAt, " := 0"))
+		}
+	}
+
+	// If the condition expression has captures, we'll need to uncapture them in the case of no match.
+	var startingCapturePos string
+	if rm.Analysis.MayContainCapture(condition) {
+		startingCapturePos = rm.reserveName("conditionalexpression_starting_capturepos")
+		c.writeLineFmt("%v := r.Crawlpos()", startingCapturePos)
+	}
+
+	// Emit the condition expression.  Route any failures to after the yes branch.  This code is almost
+	// the same as for a positive lookaround; however, a positive lookaround only needs to reset the position
+	// on a successful match, as a failed match fails the whole expression; here, we need to reset the
+	// position on completion, regardless of whether the match is successful or not.
+	rm.doneLabel = expressionNotMatched
+
+	// Save off pos.  We'll need to reset this upon successful completion of the lookaround.
+	startingPos := rm.reserveName("conditionalexpression_starting_pos")
+	c.writeLineFmt("%s := pos\n", startingPos)
+	startingSliceStaticPos := rm.sliceStaticPos
+
+	// Emit the condition. The condition expression is a zero-width assertion, which is atomic,
+	// so prevent backtracking into it.
+	c.writeLine("// Condition:")
+	if rm.Analysis.MayBacktrack(condition) {
+		// Condition expressions are treated like positive lookarounds and thus are implicitly atomic,
+		// so we need to emit the node as atomic if it might backtrack.
+		c.emitExecuteAtomic(rm, node, nil)
+	} else {
+		c.emitExecuteNode(rm, condition, nil, true)
+	}
+	c.writeLine("")
+	rm.doneLabel = originalDoneLabel
+
+	// After the condition completes successfully, reset the text positions.
+	// Do not reset captures, which persist beyond the lookaround.
+	c.writeLine("// Condition matched:")
+	c.writeLineFmt("pos = %s", startingPos)
+	c.sliceInputSpan(rm, false)
+	rm.sliceStaticPos = startingSliceStaticPos
+	c.writeLine("")
+
+	// The expression matched.  Run the "yes" branch. If it successfully matches, jump to the end.
+	c.emitExecuteNode(rm, yesBranch, nil, true)
+	c.writeLine("")
+	c.transferSliceStaticPosToPos(rm, false) // make sure sliceStaticPos is 0 after each branch
+	postYesDoneLabel := rm.doneLabel
+	if !isAtomic && postYesDoneLabel != originalDoneLabel {
+		c.writeLineFmt("%s = 0", resumeAt)
+	}
+	c.emitExecuteGoto(rm, endConditional)
+	c.writeLine("")
+
+	// After the condition completes unsuccessfully, reset the text positions
+	// _and_ reset captures, which should not persist when the whole expression failed.
+	c.writeLine("// Condition did not match:")
+	c.emitMarkLabel(rm, expressionNotMatched)
+	c.writeLineFmt("pos = %s", startingPos)
+	c.sliceInputSpan(rm, false)
+	rm.sliceStaticPos = startingSliceStaticPos
+	if len(startingCapturePos) > 0 {
+		c.emitUncaptureUntil(startingCapturePos)
+	}
+	c.writeLine("")
+
+	postNoDoneLabel := originalDoneLabel
+	if noBranch != nil {
+		// Output the no branch.
+		rm.doneLabel = originalDoneLabel
+		c.emitExecuteNode(rm, noBranch, nil, true)
+		c.writeLine("")
+		c.transferSliceStaticPosToPos(rm, false) // make sure sliceStaticPos is 0 after each branch
+		postNoDoneLabel = rm.doneLabel
+		if !isAtomic && postNoDoneLabel != originalDoneLabel {
+			c.writeLineFmt("%s = 1", resumeAt)
+		}
+	} else {
+		// There's only a yes branch.  If it's going to cause us to output a backtracking
+		// label but code may not end up taking the yes branch path, we need to emit a resumeAt
+		// that will cause the backtracking to immediately pass through this node.
+		if !isAtomic && postYesDoneLabel != originalDoneLabel {
+			c.writeLineFmt("%s = 2", resumeAt)
+		}
+	}
+
+	// If either the yes branch or the no branch contained backtracking, subsequent expressions
+	// might try to backtrack to here, so output a backtracking map based on resumeAt.
+	if isAtomic || (postYesDoneLabel == originalDoneLabel && postNoDoneLabel == originalDoneLabel) {
+		rm.doneLabel = originalDoneLabel
+		c.emitMarkLabel(rm, endConditional)
+	} else {
+		// Skip the backtracking section.
+		c.emitExecuteGoto(rm, endConditional)
+		c.writeLine("")
+
+		backtrack := rm.reserveName("ConditionalExpressionBacktrack")
+		rm.doneLabel = backtrack
+		c.emitMarkLabel(rm, backtrack)
+
+		stackCookie := c.createStackCookie()
+
+		if isInLoop {
+			// If we're not in a loop, the local will maintain its value until backtracking occurs.
+			// If we are in a loop, multiple iterations need their own value, so we need to use the stack.
+			c.emitStackPop(stackCookie, resumeAt)
+		}
+
+		c.writeLineFmt("swithc %s {", resumeAt)
+		if postYesDoneLabel != originalDoneLabel {
+			c.emitCaseGoto(rm, "case 0:", postYesDoneLabel)
+		}
+
+		if postNoDoneLabel != originalDoneLabel {
+			c.emitCaseGoto(rm, "case 1:", postNoDoneLabel)
+		}
+
+		c.emitCaseGoto(rm, "default:", originalDoneLabel)
+		c.writeLine("}")
+
+		c.emitMarkLabel(rm, endConditional)
+		if isInLoop {
+			c.emitStackPush(stackCookie, resumeAt)
+		}
+	}
 }
+
 func mapCaptureNumber(capNum int, caps map[int]int) int {
 	if capNum == -1 {
 		return -1
@@ -1803,9 +2559,141 @@ func (c *converter) emitExecuteCapture(rm *regexpData, node *syntax.RegexNode, s
 		c.emitMarkLabel(rm, end)
 	}
 }
+
+// Emits the code to handle a positive lookaround assertion. This is a positive lookahead
+// for left-to-right and a positive lookbehind for right-to-left.
 func (c *converter) emitExecutePositiveLookaroundAssertion(rm *regexpData, node *syntax.RegexNode) {
+
+	if rm.Analysis.HasRightToLeft() {
+		// Lookarounds are the only places in the node tree where we might change direction,
+		// i.e. where we might go from RegexOptions.None to RegexOptions.RightToLeft, or vice
+		// versa.  This is because lookbehinds are implemented by making the whole subgraph be
+		// RegexOptions.RightToLeft and reversed.  Since we use static position to optimize left-to-right
+		// and don't use it in support of right-to-left, we need to resync the static position
+		// to the current position when entering a lookaround, just in case we're changing direction.
+		c.transferSliceStaticPosToPos(rm, true)
+	}
+
+	// Save off pos.  We'll need to reset this upon successful completion of the lookaround.
+	name := "positivelookahead_starting_pos"
+	if node.Options&syntax.RightToLeft != 0 {
+		name = "positivelookbehind_starting_pos"
+	}
+	startingPos := rm.reserveName(name)
+	c.writeLineFmt("%s := pos\n", startingPos)
+
+	startingSliceStaticPos := rm.sliceStaticPos
+
+	// Check for timeout. Lookarounds result in re-processing the same input, so while not
+	// technically backtracking, it's appropriate to have a timeout check.
+	c.emitTimeoutCheckIfNeeded(rm)
+
+	// Emit the child.
+	child := node.Children[0]
+	if rm.Analysis.MayBacktrack(child) {
+		// Lookarounds are implicitly atomic, so we need to emit the node as atomic if it might backtrack.
+		c.emitExecuteAtomic(rm, node, nil)
+	} else {
+		c.emitExecuteNode(rm, child, nil, true)
+	}
+
+	// After the child completes successfully, reset the text positions.
+	// Do not reset captures, which persist beyond the lookaround.
+	c.writeLineFmt("\npos = %s", startingPos)
+	c.sliceInputSpan(rm, false)
+
+	rm.sliceStaticPos = startingSliceStaticPos
 }
+
+// Emits the code to handle a negative lookaround assertion. This is a negative lookahead
+// for left-to-right and a negative lookbehind for right-to-left.
 func (c *converter) emitExecuteNegativeLookaroundAssertion(rm *regexpData, node *syntax.RegexNode) {
+	if rm.Analysis.HasRightToLeft() {
+		// Lookarounds are the only places in the node tree where we might change direction,
+		// i.e. where we might go from RegexOptions.None to RegexOptions.RightToLeft, or vice
+		// versa.  This is because lookbehinds are implemented by making the whole subgraph be
+		// RegexOptions.RightToLeft and reversed.  Since we use static position to optimize left-to-right
+		// and don't use it in support of right-to-left, we need to resync the static position
+		// to the current position when entering a lookaround, just in case we're changing direction.
+		c.transferSliceStaticPosToPos(rm, true)
+	}
+
+	originalDoneLabel := rm.doneLabel
+
+	// Save off pos.  We'll need to reset this upon successful completion of the lookaround.
+	variablePrefix := "negativelookahead_"
+	if node.Options&syntax.RightToLeft != 0 {
+		variablePrefix = "negativelookbehind_"
+	}
+	startingPos := rm.reserveName(fmt.Sprint(variablePrefix, "starting_pos"))
+	c.writeLineFmt("%s := pos\n", startingPos)
+	startingSliceStaticPos := rm.sliceStaticPos
+
+	negativeLookaroundDoneLabel := rm.reserveName("NegativeLookaroundMatch")
+	rm.doneLabel = negativeLookaroundDoneLabel
+
+	// Check for timeout. Lookarounds result in re-processing the same input, so while not
+	// technically backtracking, it's appropriate to have a timeout check.
+	c.emitTimeoutCheckIfNeeded(rm)
+
+	child := node.Children[0]
+
+	// Ensure we're able to uncapture anything captured by the child.
+	stackCookie := c.createStackCookie()
+	isInLoop := false
+	var capturePos string
+	hasCaptures := rm.Analysis.MayContainCapture(child)
+	if hasCaptures {
+		// If we're inside a loop, push the current crawl position onto the stack,
+		// so that each iteration tracks its own value. Otherwise, store it into a local.
+		isInLoop = rm.Analysis.IsInLoop(node)
+		if isInLoop {
+			c.emitStackPush(stackCookie, "r.Crawlpos()")
+		} else {
+			capturePos = rm.reserveName(fmt.Sprint(variablePrefix, "_capture_pos"))
+			rm.addLocalDec(fmt.Sprint(capturePos, " := 0"))
+			c.writeLineFmt("%s = r.Crawlpos()", capturePos)
+		}
+	}
+
+	// Emit the child.
+	if rm.Analysis.MayBacktrack(child) {
+		// Lookarounds are implicitly atomic, so we need to emit the node as atomic if it might backtrack.
+		c.emitExecuteAtomic(rm, node, nil)
+	} else {
+		c.emitExecuteNode(rm, child, nil, true)
+	}
+
+	// If the generated code ends up here, it matched the lookaround, which actually
+	// means failure for a _negative_ lookaround, so we need to jump to the original done.
+	c.writeLine("")
+	if hasCaptures && isInLoop {
+		// Pop the crawl position from the stack.
+		c.writeLine("stackpos--;")
+		c.emitStackCookieValidate(stackCookie)
+	}
+	c.emitExecuteGoto(rm, originalDoneLabel)
+	c.writeLine("")
+
+	// Failures (success for a negative lookaround) jump here.
+	c.emitMarkLabel(rm, negativeLookaroundDoneLabel)
+
+	// After the child completes in failure (success for negative lookaround), reset the text positions.
+	c.writeLineFmt("pos = %s", startingPos)
+	c.sliceInputSpan(rm, false)
+	rm.sliceStaticPos = startingSliceStaticPos
+
+	// And uncapture anything if necessary. Negative lookaround captures don't persist beyond the lookaround.
+	if hasCaptures {
+		if isInLoop {
+			c.emitUncaptureUntil("r.StackPop()")
+			c.emitStackCookieValidate(stackCookie)
+		} else {
+			c.emitUncaptureUntil(capturePos)
+		}
+	}
+
+	rm.doneLabel = originalDoneLabel
 }
 
 // Gets whether calling Goto(label) will result in exiting the match method.
@@ -1937,7 +2825,7 @@ func sum(constant int, local *string) string {
 	if constant == 0 {
 		return *local
 	}
-	return fmt.Sprintf("%v + %s", constant, local)
+	return fmt.Sprintf("%v + %s", constant, *local)
 }
 
 // Emits a check that the span is large enough at the currently known static position to handle the required additional length.

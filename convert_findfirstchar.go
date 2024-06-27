@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"unicode"
 
 	"github.com/dlclark/regexp2/syntax"
@@ -309,7 +310,10 @@ func (c *converter) emitIndexOfString_LeftToRight(rm *regexpData) {
 			offsetDescription = fmt.Sprint(" at index ", opts.FixedDistanceLiteral.Distance, " in the pattern")
 		}
 	}
+
 	/*
+		TODO: is this needed? not sure a stringsearch is going to add value here
+
 		substringAndComparison := fmt.Sprint(substring, stringComparison)
 		fieldName := "sv"
 		if isValidInFieldName(substring) {
@@ -320,16 +324,9 @@ func (c *converter) emitIndexOfString_LeftToRight(rm *regexpData) {
 
 		if _, ok := c.requiredHelpers[fieldName]; !ok {
 			c.requiredHelpers[fieldName] = fmt.Sprintf(`// Supports searching for the string %#[1]v
-			var %[2]v = helpers.NewStringSearchValues(%#[1]v, %#[3]v)`,
+				var %[2]v = helpers.NewStringSearchValues(%#[1]v, %#[3]v)`,
 				[]rune(substring), fieldName, ignoreCase)
-		}
-
-		c.writeLineFmt(`// The pattern has the literal %#v %v. Find the next occurrence.
-		// If it can't be found, there's no match
-		if i := %v.IndexOfAny(r.Runtext, pos%v); i >= 0 {
-			r.Runtextpos = i
-			return true
-		}`, substring, offsetDescription, fieldName, offset)*/
+		}*/
 
 	c.writeLineFmt(`// The pattern has the literal %#v %v. Find the next occurrence.
 	// If it can't be found, there's no match
@@ -353,11 +350,24 @@ func (c *converter) emitIndexOfString_RightToLeft(rm *regexpData) {
 	`, prefix, len(prefix))
 }
 
+func getRuneSliceSliceLiteral(vals []string) string {
+	buf := &bytes.Buffer{}
+	buf.WriteString("[][]rune{")
+	sep := ""
+	for i := 0; i < len(vals); i++ {
+		buf.WriteString(sep)
+		buf.WriteString(getRuneSliceLiteral(vals[i]))
+		sep = ", "
+	}
+	buf.WriteString("}")
+	return buf.String()
+}
+
 // Emits a case-sensitive left-to-right search for any one of multiple leading prefixes.
 func (c *converter) emitIndexOfStrings_LeftToRight(rm *regexpData) {
 	opts := rm.Tree.FindOptimizations
 
-	prefixes := fmt.Sprintf("%#v", opts.LeadingPrefixes)
+	prefixes := getRuneSliceSliceLiteral(opts.LeadingPrefixes)
 	stringComparison := ""
 	ignoreCase := false
 	if opts.FindMode == syntax.LeadingStrings_OrdinalIgnoreCase_LeftToRight {
@@ -369,16 +379,33 @@ func (c *converter) emitIndexOfStrings_LeftToRight(rm *regexpData) {
 	if _, ok := c.requiredHelpers[fieldName]; !ok {
 		// explicitly using an array in case prefixes is large
 		c.requiredHelpers[fieldName] = fmt.Sprintf(`// Supports searching for the specified strings
-		var %v = regexp2.NewSearchValues(%#v, %v)`,
+		var %v = helpers.NewStringSearchValues(%s, %v)`,
 			fieldName, prefixes, ignoreCase)
 	}
 
 	c.writeLineFmt(`// The pattern has multiple strings that could begin the match. Search for any of them.
 	// If none can be found, there's no match
-	if i := %v.IndexOfAny(r.Runtext, pos); i >= 0 {
+	if i := %v.IndexOfAny(r.Runtext[pos:]); i >= 0 {
 		r.Runtextpos = i
 		return true
 	}`, fieldName)
+}
+
+func (c *converter) emitSetDefinition(set *syntax.CharSet) string {
+	var hash []byte
+	set.HashInto(hash)
+	vals := string(hash)
+
+	fieldName := fmt.Sprint("set_", getSHA256FieldName(vals))
+
+	if _, ok := c.requiredHelpers[fieldName]; !ok {
+		// explicitly using an array in case prefixes is large
+		c.requiredHelpers[fieldName] = fmt.Sprintf(`// The set %v
+		var %v = regexp2.NewCharSetRuntime(%#v)`,
+			set.String(), fieldName, vals)
+	}
+
+	return fieldName
 }
 
 // Emits a search for a set at a fixed position from the start of the pattern,
@@ -472,7 +499,7 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 		} else {
 			// We have an arbitrary set of characters that's really large or otherwise not enumerable.
 			// We use a custom IndexOfAny helper that will perform the search as efficiently as possible.
-			indexOf = c.emitIndexOfAnyCustomHelper(rm, primarySet.Set, span)
+			indexOf = c.emitIndexOfAnyCustomHelper(rm, primarySet.Set, negated, span)
 		}
 
 		if needLoop {
@@ -697,6 +724,9 @@ func differByOneBit(a, b rune) (rune, bool) {
 }
 
 func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet, negate bool, chExpr string) string {
+	//this is in-line and produces an expression that resolves to a bool,
+	//so anything that requires a new var must call a function
+
 	// We need to perform the equivalent of calling RegexRunner.CharInClass(ch, charClass),
 	// but that call is relatively expensive.  Before we fall back to it, we try to optimize
 	// some common cases for which we can do much better, such as known character classes
@@ -949,145 +979,164 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		return fmt.Sprintf("%shelpers.IsInMask64(%s-%q, 0x%x)", negStr, chExpr, analysis.LowerBoundInclusiveIfOnlyRanges, bitmap)
 	}
 
+	// All options after this point require a ch local.
+	// in the C# version this requires assignment statements, which Go doesn't have
+	// so we just repeat chExpr and let the compiler handle temp var
+	//rm.addLocalDec("var ch rune")
+
+	// Next, handle simple sets of two ranges, e.g. [\p{IsGreek}\p{IsGreekExtended}].
+	if ranges := set.GetIfNRanges(2); len(ranges) == 2 {
+		negate = (negate != set.IsNegated())
+
+		op := "||"
+		if negate {
+			op = "&&"
+		}
+		return fmt.Sprintf("%s %s %s",
+			getRangeCheckClause(chExpr, ranges[0], negate),
+			op,
+			getRangeCheckClause(chExpr, ranges[1], negate))
+	}
+
+	if analysis.ContainsNoAscii {
+		// We determined that the character class contains only non-ASCII,
+		// for example if the class were [\u1000-\u2000\u3000-\u4000\u5000-\u6000].
+		// (In the future, we could possibly extend the rm.Analysis to produce a known
+		// lower-bound and compare against that rather than always using 128 as the
+		// pivot point.)
+		return c.emitContainsNoAscii(negate, chExpr, set)
+	}
+	if analysis.AllAsciiContained {
+		// We determined that every ASCII character is in the class, for example
+		// if the class were the negated example from case 1 above:
+		// [^\p{IsGreek}\p{IsGreekExtended}].
+		return c.emitAllAsciiContained(negate, chExpr, set)
+	}
+
+	// Now, our big hammer is to generate a lookup table that lets us quickly index by character into a yes/no
+	// answer as to whether the character is in the target character class.  However, we don't want to store
+	// a lookup table for every possible character for every character class in the regular expression; at one
+	// bit for each of 65K characters, that would be an 8K bitmap per character class.  Instead, we handle the
+	// common case of ASCII input via such a lookup table, which at one bit for each of 128 characters is only
+	// 16 bytes per character class.  We of course still need to be able to handle inputs that aren't ASCII, so
+	// we check the input against 128, and have a fallback if the input is >= to it.  Determining the right
+	// fallback could itself be expensive.  For example, if it's possible that a value >= 128 could match the
+	// character class, we output a call to RegexRunner.CharInClass, but we don't want to have to enumerate the
+	// entire character class evaluating every character against it, just to determine whether it's a match.
+	// Instead, we employ some quick heuristics that will always ensure we provide a correct answer even if
+	// we could have sometimes generated better code to give that answer.
+
+	// Generate the lookup table to store 128 answers as bits. We use a const string instead of a byte[] / static
+	// data property because it lets IL emit handle all the details for us.
+	// String length is 8 chars == 16 bytes == 128 bits.
+	bitVector := make([]uint64, 2)
+
+	for i := rune(0); i < unicode.MaxASCII; i++ {
+		if set.CharIn(i) {
+			bitVector[i/64] |= (1 << (i % 64))
+		}
+	}
+
+	// There's a chance that the class contains either no ASCII characters or all of them,
+	// and the analysis could not find it (for example if the class has a subtraction).
+	// We optimize away the bit vector in these trivial cases.
+	if bitVector[0] == 0 && bitVector[1] == 0 {
+		// no ascii at all
+		return c.emitContainsNoAscii(negate, chExpr, set)
+	}
+	if bitVector[0] == math.MaxUint64 && bitVector[1] == math.MaxUint64 {
+		// all ascii is included
+		return c.emitAllAsciiContained(negate, chExpr, set)
+	}
 	/*
-		            // All options after this point require a ch local.
-		            additionalDeclarations.Add("char ch;");
+	   // We determined that the character class may contain ASCII, so we
+	   // output the lookup against the lookup table.
 
-		            // Next, handle simple sets of two ranges, e.g. [\p{IsGreek}\p{IsGreekExtended}].
-					TODO: this
-		            if (RegexCharClass.TryGetDoubleRange(charClass, out (char LowInclusive, char HighInclusive) range0, out (char LowInclusive, char HighInclusive) range1))
-		            {
-		                negate ^= RegexCharClass.IsNegated(charClass);
+	   if (analysis.ContainsOnlyAscii)
+	   {
+	       // If all inputs that could match are ASCII, we only need the lookup table, guarded
+	       // by a check for the upper bound (which serves both to limit for what characters
+	       // we need to access the lookup table and to bounds check the lookup table access).
+	       return negate ?
+	           $"((ch = {chExpr}) >= {Literal((char)analysis.UpperBoundExclusiveIfOnlyRanges)} || ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) == 0)" :
+	           $"((ch = {chExpr}) < {Literal((char)analysis.UpperBoundExclusiveIfOnlyRanges)} && ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) != 0)";
+	   }
 
-		                string range0Clause = range0.LowInclusive == range0.HighInclusive ?
-		                    $"((ch = {chExpr}) {(negate ? "!=" : "==")} {Literal(range0.LowInclusive)})" :
-		                    $"((uint)((ch = {chExpr}) - {Literal(range0.LowInclusive)}) {(negate ? ">" : "<=")} (uint)({Literal(range0.HighInclusive)} - {Literal(range0.LowInclusive)}))";
+	   if (analysis.AllNonAsciiContained)
+	   {
+	       // If every non-ASCII value is considered a match, we can immediately succeed for any
+	       // non-ASCII inputs, and access the lookup table for the rest.
+	       return negate ?
+	           $"((ch = {chExpr}) < 128 && ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) == 0)" :
+	           $"((ch = {chExpr}) >= 128 || ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) != 0)";
+	   }
 
-		                string range1Clause = range1.LowInclusive == range1.HighInclusive ?
-		                    $"(ch {(negate ? "!=" : "==")} {Literal(range1.LowInclusive)})" :
-		                    $"((uint)(ch - {Literal(range1.LowInclusive)}) {(negate ? ">" : "<=")} (uint)({Literal(range1.HighInclusive)} - {Literal(range1.LowInclusive)}))";
+	   // We know that the whole class wasn't ASCII, and we don't know anything about the non-ASCII
+	   // characters other than that some might be included, for example if the character class
+	   // were [\w\d], so if ch >= 128, we need to fall back to calling CharInClass. For ASCII, we
+	   // can use a lookup table, but if it's a known set of ASCII characters we can also use a helper.
+	   string asciiExpr = bitVectorString switch
+	   {
+	       "\0\0\0\u03ff\ufffe\u07ff\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetterOrDigit(ch)",
 
-		                return negate ?
-		                    $"({range0Clause} & {range1Clause})" :
-		                    $"({range0Clause} | {range1Clause})";
-		            }
+	       "\0\0\0\u03FF\0\0\0\0" => $"{(negate ? "!" : "")}char.IsAsciiDigit(ch)",
 
-		            if (analysis.ContainsNoAscii)            {
-		                // We determined that the character class contains only non-ASCII,
-		                // for example if the class were [\u1000-\u2000\u3000-\u4000\u5000-\u6000].
-		                // (In the future, we could possibly extend the rm.Analysis to produce a known
-		                // lower-bound and compare against that rather than always using 128 as the
-		                // pivot point.)
-		                return EmitContainsNoAscii();
-		            }
+	       "\0\0\0\0\ufffe\u07FF\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetter(ch)",
+	       "\0\0\0\0\0\0\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetterLower(ch)",
+	       "\0\0\0\0\ufffe\u07FF\0\0" => $"{(negate ? "!" : "")}char.IsAsciiLetterUpper(ch)",
 
-		            if (analysis.AllAsciiContained)            {
-		                // We determined that every ASCII character is in the class, for example
-		                // if the class were the negated example from case 1 above:
-		                // [^\p{IsGreek}\p{IsGreekExtended}].
-		                return EmitAllAsciiContained();
-		            }
+	       "\0\0\0\u03FF\u007E\0\u007E\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigit(ch)",
+	       "\0\0\0\u03FF\0\0\u007E\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigitLower(ch)",
+	       "\0\0\0\u03FF\u007E\0\0\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigitUpper(ch)",
 
-		            // Now, our big hammer is to generate a lookup table that lets us quickly index by character into a yes/no
-		            // answer as to whether the character is in the target character class.  However, we don't want to store
-		            // a lookup table for every possible character for every character class in the regular expression; at one
-		            // bit for each of 65K characters, that would be an 8K bitmap per character class.  Instead, we handle the
-		            // common case of ASCII input via such a lookup table, which at one bit for each of 128 characters is only
-		            // 16 bytes per character class.  We of course still need to be able to handle inputs that aren't ASCII, so
-		            // we check the input against 128, and have a fallback if the input is >= to it.  Determining the right
-		            // fallback could itself be expensive.  For example, if it's possible that a value >= 128 could match the
-		            // character class, we output a call to RegexRunner.CharInClass, but we don't want to have to enumerate the
-		            // entire character class evaluating every character against it, just to determine whether it's a match.
-		            // Instead, we employ some quick heuristics that will always ensure we provide a correct answer even if
-		            // we could have sometimes generated better code to give that answer.
-
-		            // Generate the lookup table to store 128 answers as bits. We use a const string instead of a byte[] / static
-		            // data property because it lets IL emit handle all the details for us.
-					// String length is 8 chars == 16 bytes == 128 bits.
-					// Note the using of uint16 for consistency with C#, this could likely be optimized for Go
-					bitVector := make([]byte, 16)
-
-					for i := rune(0);i<unicode.MaxASCII;i++ {
-						if set.CharIn(i) {
-							bitVector[i>>4] |= (1<<(i&0x0f))
-
-						}
-					}
-
-		            // There's a chance that the class contains either no ASCII characters or all of them,
-		            // and the analysis could not find it (for example if the class has a subtraction).
-		            // We optimize away the bit vector in these trivial cases.
-
-		            switch (bitVectorString)
-		            {
-		                case "\0\0\0\0\0\0\0\0": return EmitContainsNoAscii();
-		                case "\uffff\uffff\uffff\uffff\uffff\uffff\uffff\uffff": return EmitAllAsciiContained();
-		            }
-
-		            // We determined that the character class may contain ASCII, so we
-		            // output the lookup against the lookup table.
-
-		            if (analysis.ContainsOnlyAscii)
-		            {
-		                // If all inputs that could match are ASCII, we only need the lookup table, guarded
-		                // by a check for the upper bound (which serves both to limit for what characters
-		                // we need to access the lookup table and to bounds check the lookup table access).
-		                return negate ?
-		                    $"((ch = {chExpr}) >= {Literal((char)analysis.UpperBoundExclusiveIfOnlyRanges)} || ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) == 0)" :
-		                    $"((ch = {chExpr}) < {Literal((char)analysis.UpperBoundExclusiveIfOnlyRanges)} && ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) != 0)";
-		            }
-
-		            if (analysis.AllNonAsciiContained)
-		            {
-		                // If every non-ASCII value is considered a match, we can immediately succeed for any
-		                // non-ASCII inputs, and access the lookup table for the rest.
-		                return negate ?
-		                    $"((ch = {chExpr}) < 128 && ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) == 0)" :
-		                    $"((ch = {chExpr}) >= 128 || ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) != 0)";
-		            }
-
-		            // We know that the whole class wasn't ASCII, and we don't know anything about the non-ASCII
-		            // characters other than that some might be included, for example if the character class
-		            // were [\w\d], so if ch >= 128, we need to fall back to calling CharInClass. For ASCII, we
-		            // can use a lookup table, but if it's a known set of ASCII characters we can also use a helper.
-		            string asciiExpr = bitVectorString switch
-		            {
-		                "\0\0\0\u03ff\ufffe\u07ff\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetterOrDigit(ch)",
-
-		                "\0\0\0\u03FF\0\0\0\0" => $"{(negate ? "!" : "")}char.IsAsciiDigit(ch)",
-
-		                "\0\0\0\0\ufffe\u07FF\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetter(ch)",
-		                "\0\0\0\0\0\0\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetterLower(ch)",
-		                "\0\0\0\0\ufffe\u07FF\0\0" => $"{(negate ? "!" : "")}char.IsAsciiLetterUpper(ch)",
-
-		                "\0\0\0\u03FF\u007E\0\u007E\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigit(ch)",
-		                "\0\0\0\u03FF\0\0\u007E\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigitLower(ch)",
-		                "\0\0\0\u03FF\u007E\0\0\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigitUpper(ch)",
-
-		                _ => $"({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) {(negate ? "=" : "!")}= 0",
-		            };
-		            return $"((ch = {chExpr}) < 128 ? {asciiExpr} : {(negate ? "!" : "")}RegexRunner.CharInClass((char)ch, {Literal(charClass)}))";
+	       _ => $"({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) {(negate ? "=" : "!")}= 0",
+	   };
+	   return $"((ch = {chExpr}) < 128 ? {asciiExpr} : {(negate ? "!" : "")}RegexRunner.CharInClass((char)ch, {Literal(charClass)}))";
 	*/
-	return "emitMatchCharacterClassTODO()"
 
-}
-
-func (c *converter) emitIndexOfAnyCustomHelper(rm *regexpData, set *syntax.CharSet, spanName string) string {
-	return "indexOfAnyCustomHelper()"
-}
-
-func emitContainsNoAscii(negate bool, chExpr string, set *syntax.CharSet) string {
+	// very base option, not optimized
+	setField := c.emitSetDefinition(set)
 	if negate {
-		return "((ch = {chExpr}) < 128 || !RegexRunner.CharInClass((char)ch, {Literal(charClass)}))"
+		return fmt.Sprintf("!%s.CharIn(%s)", setField, chExpr)
 	}
-
-	return "((ch = {chExpr}) >= 128 && RegexRunner.CharInClass((char)ch, {Literal(charClass)}))"
+	return fmt.Sprintf("%s.CharIn(%s)", setField, chExpr)
 }
 
-func emitAllAsciiContained(negate bool, chExpr string, set *syntax.CharSet) string {
+func getRangeCheckClause(chExpr string, r syntax.SingleRange, negate bool) string {
 	if negate {
-		return "((ch = {chExpr}) >= 128 && !RegexRunner.CharInClass((char)ch, {Literal(charClass)}))"
+		if r.First == r.Last {
+			return fmt.Sprintf("%s != %q", chExpr, r.First)
+		} else {
+			return fmt.Sprintf("%s - %q > %v", chExpr, r.First, r.Last-r.First)
+		}
 	}
+	if r.First == r.Last {
+		return fmt.Sprintf("%s == %q", chExpr, r.First)
+	}
+	return fmt.Sprintf("%s - %q <= %v", chExpr, r.First, r.Last-r.First)
+}
 
-	return "((ch = {chExpr}) < 128 || RegexRunner.CharInClass((char)ch, {Literal(charClass)}))"
+func (c *converter) emitIndexOfAnyCustomHelper(rm *regexpData, set *syntax.CharSet, negate bool, spanName string) string {
+	//TODO: see if it's worth it to identify the set and
+	//use a dedicated helper for this set
+
+	// this is the most general form of the helper
+	match := c.emitMatchCharacterClass(rm, set, negate, "ch")
+	return fmt.Sprintf("helpers.IndexFunc(%s, func(ch rune) bool { return %s })", spanName, match)
+}
+
+func (c *converter) emitContainsNoAscii(negate bool, chExpr string, set *syntax.CharSet) string {
+	setField := c.emitSetDefinition(set)
+	if negate {
+		return fmt.Sprintf("%s < 128 || !%s.CharIn(%[1]s)", chExpr, setField)
+	}
+	return fmt.Sprintf("%s >= 128 && %s.CharIn(%[1]s)", chExpr, setField)
+}
+
+func (c *converter) emitAllAsciiContained(negate bool, chExpr string, set *syntax.CharSet) string {
+	setField := c.emitSetDefinition(set)
+	if negate {
+		return fmt.Sprintf("%s >= 128 && !%s.CharIn(%[1]s)", chExpr, setField)
+	}
+	return fmt.Sprintf("%s < 128 || %s.CharIn(%[1]s)", chExpr, setField)
 }
