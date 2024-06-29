@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"go/format"
 
 	"fmt"
 	"io"
@@ -16,7 +17,9 @@ import (
 )
 
 type converter struct {
-	//TODO: capture helper functions and values we need here? or should they be in the regexp2 package?
+	// buffer for our output
+	buf *bytes.Buffer
+	// writer from the consumer
 	out io.Writer
 
 	data []*regexpData
@@ -28,6 +31,7 @@ type converter struct {
 
 func newConverter(out io.Writer) (*converter, error) {
 	c := &converter{
+		buf:             &bytes.Buffer{},
 		out:             out,
 		requiredHelpers: make(map[string]string),
 	}
@@ -52,15 +56,14 @@ func (c *converter) addHeader() error {
 	c.writeLine("import (")
 	c.writeLine("  \"github.com/dlclark/regexp2\"")
 	c.writeLine("  \"github.com/dlclark/regexp2/helpers\"")
-	//c.writeLine("  \"github.com/dlclark/regexp2/syntax\"")
+	c.writeLine("  \"github.com/dlclark/regexp2/syntax\"")
+	c.writeLine("  \"unicode\"")
 	c.writeLine(")")
 
 	return c.err
 }
 
 func (c *converter) addFooter() error {
-	// TODO: this
-
 	/*
 			func init() {
 				regexp2.RegisterEngine("ABCD+", regexp2.ECMAScript, &MyPattern_Engine{})
@@ -77,7 +80,21 @@ func (c *converter) addFooter() error {
 	for _, rm := range c.data {
 		c.writeLineFmt("regexp2.RegisterEngine(%v, %v, &%s_Engine{})", getGoLiteral(rm.Pattern), rm.Options, rm.GeneratedName)
 	}
+	// emit basic usage of imports so we don't have to deal with import re-writing
+	c.writeLine("var _ = helpers.Min")
+	c.writeLine("var _ = syntax.NewCharSetRuntime")
+	c.writeLine("var _ = unicode.IsDigit")
 	c.writeLine("}")
+
+	//format the code
+	origCode := c.buf.Bytes()
+	fmtOut, err := format.Source(origCode)
+
+	if err != nil {
+		c.out.Write(origCode)
+		return err
+	}
+	c.out.Write(fmtOut)
 
 	return c.err
 }
@@ -127,6 +144,10 @@ func (rm *regexpData) unusedLabels() []string {
 	return retval
 }
 func (rm *regexpData) addLocalDec(dec string) {
+	// prevent dupes
+	if slices.Contains(rm.additionalDeclarations, dec) {
+		return
+	}
 	rm.additionalDeclarations = append(rm.additionalDeclarations, dec)
 }
 
@@ -140,9 +161,9 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 		return errors.Wrap(err, "code generation not supported")
 	}
 
-	oldOut := c.out
+	oldOut := c.buf
 	buf := &bytes.Buffer{}
-	c.out = buf
+	c.buf = buf
 
 	c.writeLineFmt("/*\n%s\n*/", tree.Dump())
 
@@ -165,13 +186,13 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 
 	// get our string for final manipulation
 	output := buf.String()
-	c.out = oldOut
+	c.buf = oldOut
 
 	// finalize our code
 	removeUnusedLabels(&output, rm)
 
 	// write our temp out buffer into our saved buffer
-	c.out.Write([]byte(output))
+	c.buf.Write([]byte(output))
 
 	return c.err
 }
@@ -183,13 +204,15 @@ func removeUnusedLabels(output *string, rm *regexpData) {
 	for _, label := range unusedLabels {
 		// the label is on its own line with a colon at the end
 		*output = strings.ReplaceAll(*output, "\n"+label+":\n", "\n")
+		// or the label could be on its own line with a semicolon at the end
+		*output = strings.ReplaceAll(*output, "\n"+label+": ;\n", "\n")
 	}
 }
 
 func (c *converter) emitRegexStart(rm *regexpData) {
 
 	/*
-		// from ABC.go:120:10
+		// From ABC.go:120:10
 		// Pattern: [ABCD]+
 		// Options: regexp2.ECMAScript
 		type MyPattern0_Engine struct{}
@@ -204,7 +227,7 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 	rm.Tree.Captop = capsize
 
 	c.writeLineFmt("// From %s", rm.SourceLocation)
-	c.writeLineFmt("// Pattern: %s", rm.Pattern)
+	c.writeLineFmt("// Pattern: %#v", rm.Pattern)
 	c.writeLineFmt("// Options: %v", rm.Options)
 	c.writeLineFmt("type %s_Engine struct{}", rm.GeneratedName)
 	c.writeLineFmt("func (%s_Engine) Caps() map[int]int { return %s }", rm.GeneratedName, getGoLiteral(caps))
@@ -419,24 +442,24 @@ func (c *converter) emitLabel(label string) {
 }
 
 func (c *converter) write(data string) {
-	_, err := fmt.Fprint(c.out, data)
+	_, err := fmt.Fprint(c.buf, data)
 	if err != nil {
 		c.err = err
 	}
 }
 func (c *converter) writeLine(line string) {
-	_, err := fmt.Fprintln(c.out, line)
+	_, err := fmt.Fprintln(c.buf, line)
 	if err != nil {
 		c.err = err
 	}
 }
 
 func (c *converter) writeLineFmt(format string, args ...any) {
-	_, err := fmt.Fprintf(c.out, format, args...)
+	_, err := fmt.Fprintf(c.buf, format, args...)
 	if err != nil {
 		c.err = err
 	}
-	_, err = c.out.Write([]byte{'\n'})
+	_, err = c.buf.Write([]byte{'\n'})
 	if err != nil {
 		c.err = err
 	}

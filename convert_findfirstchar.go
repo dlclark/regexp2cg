@@ -30,12 +30,12 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 	}
 
 	needPosVar := true
-	oldOut := c.out
+	oldOut := c.buf
 	buf := &bytes.Buffer{}
-	c.out = buf
+	c.buf = buf
 	defer func() {
 		// lets clean this up at the end
-		c.out = oldOut
+		c.buf = oldOut
 
 		if needPosVar {
 			c.writeLine("pos := r.Runtextpos")
@@ -50,7 +50,7 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 		rm.additionalDeclarations = []string{}
 
 		// then write our temp out buffer into our saved buffer
-		c.out.Write(buf.Bytes())
+		c.buf.Write(buf.Bytes())
 	}()
 
 	// Generate length check.  If the input isn't long enough to possibly match, fail quickly.
@@ -62,14 +62,14 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 		if minRequiredLength == 1 {
 			c.writeLine("// Empty matches aren't possible")
 			if !rtl {
-				c.writeLine("if pos < r.Runtextend {")
+				c.writeLine("if pos < len(r.Runtext) {")
 			} else {
 				c.writeLine("if pos > 1 {")
 			}
 		} else {
 			c.writeLineFmt("// Any possible match is at least %v characters", minRequiredLength)
 			if !rtl {
-				c.writeLineFmt("if pos <= r.Runtextend - %v {", minRequiredLength)
+				c.writeLineFmt("if pos <= len(r.Runtext) - %v {", minRequiredLength)
 			} else {
 				c.writeLineFmt("if pos >= %v {", minRequiredLength)
 			}
@@ -118,7 +118,7 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 		}
 		var setPos string
 		if !rtl {
-			setPos = "r.Runtextend"
+			setPos = "len(r.Runtext)"
 		} else {
 			setPos = "0"
 		}
@@ -161,8 +161,8 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// If we're not currently at the end (or a newline just before it), skip ahead
 		// since nothing until then can possibly match.
 		c.writeLine(`// The pattern leads with an end (\Z) anchor.
-		if pos < r.Runtextend - 1 {
-			r.Runtextpos = r.Runtextend - 1
+		if pos < len(r.Runtext) - 1 {
+			r.Runtextpos = len(r.Runtext) - 1
 		}
 		return true
 		`)
@@ -173,8 +173,8 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// If we're not currently at the end (or a newline just before it), skip ahead
 		// since nothing until then can possibly match.
 		c.writeLine(`// The pattern leads with an end (\z) anchor.
-		if pos < r.Runtextend {
-			r.Runtextpos = r.Runtextend
+		if pos < len(r.Runtext) {
+			r.Runtextpos = len(r.Runtext)
 		}
 		return true
 		`)
@@ -195,7 +195,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// If we're currently at the end, we're at a valid position to try.  Otherwise,
 		// we'll never be (we're iterating from end to beginning), so fail immediately.
 		c.writeLine(`// The pattern leads with an end (\Z) anchor when processed right to left.
-		if pos >= r.Runtextend - 1 && (pos >= r.Runtextend || r.Runtext[pos] == '\n') {
+		if pos >= len(r.Runtext) - 1 && (pos >= len(r.Runtext) || r.Runtext[pos] == '\n') {
 			return true
 		}
 		`)
@@ -205,7 +205,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// If we're currently at the end, we're at a valid position to try.  Otherwise,
 		// we'll never be (we're iterating from end to beginning), so fail immediately.
 		c.writeLine(`// The pattern leads with an end (\z) anchor when processed right to left.
-		if pos >= r.Runtextend {
+		if pos >= len(r.Runtext) {
 			return true
 		}
 		`)
@@ -214,8 +214,8 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	case syntax.TrailingAnchor_FixedLength_LeftToRight_EndZ:
 		// Jump to the end, minus the min required length, which in this case is actually the fixed length, minus 1 (for a possible ending \n).
 		c.writeLineFmt(`// The pattern has a trailing end (\Z) anchor, and any possible match is exactly %v characters.
-		if pos < r.Runtextend - %v {
-			r.Runtextpos = r.Runtextend - %[2]v
+		if pos < len(r.Runtext) - %v {
+			r.Runtextpos = len(r.Runtext) - %[2]v
 		}
 		return true
 		`, regexTree.FindOptimizations.MinRequiredLength, regexTree.FindOptimizations.MinRequiredLength+1)
@@ -225,8 +225,8 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	case syntax.TrailingAnchor_FixedLength_LeftToRight_End:
 		// Jump to the end, minus the min required length, which in this case is actually the fixed length.
 		c.writeLineFmt(`// The pattern has a trailing end (\z) anchor, and any possible match is exactly %v characters.
-		if pos < r.Runtextend - %[1]v {
-			r.Runtextpos = r.Runtextend - %[1]v
+		if pos < len(r.Runtext) - %[1]v {
+			r.Runtextpos = len(r.Runtext) - %[1]v
 		}
 		return true
 		`, regexTree.FindOptimizations.MinRequiredLength)
@@ -251,13 +251,13 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// to boost our position to the next line, and then continue normally with any searches.
 		c.writeLineFmt(`// The pattern has a leading beginning-of-line anchor.
 			if pos > 0 && r.Runtext[pos-1] != '\n' {
-				newlinePos := slices.Index(r.Runtext[pos:], '\n'
-				if newlinePos > r.Runtextend - pos - 1 {
+				newlinePos := helpers.IndexOfAny1(r.Runtext[pos:], '\n')
+				if newlinePos > len(r.Runtext) - pos - 1 {
 					goto NoMatchFound
 				}
 				pos += newlinePos + 1
 
-				if pos %v r.Runtextend%v {
+				if pos %v len(r.Runtext)%v {
 					goto NoMatchFound
 				}
 			}
@@ -269,14 +269,14 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	if regexTree.FindOptimizations.MaxPossibleLength > -1 {
 		if regexTree.FindOptimizations.TrailingAnchor == syntax.NtEnd {
 			c.writeLineFmt(`// The pattern has a trailing end (\z) anchor, and any possible match is no more than %v characters.
-			if pos < r.Runtextend - %[1]v {
-				pos = r.Runtextend - %[1]v
+			if pos < len(r.Runtext) - %[1]v {
+				pos = len(r.Runtext) - %[1]v
 			}
 			`, regexTree.FindOptimizations.MaxPossibleLength)
 		} else if regexTree.FindOptimizations.TrailingAnchor == syntax.NtEndZ {
 			c.writeLineFmt(`// The pattern has a trailing end (\Z) anchor, and any possible match is no more than %v characters.
-			if pos < r.Runtextend - %[1]v {
-				pos = r.Runtextend - %[1]v
+			if pos < len(r.Runtext) - %[1]v {
+				pos = len(r.Runtext) - %[1]v
 			}
 			`, regexTree.FindOptimizations.MaxPossibleLength+1)
 		}
@@ -401,7 +401,7 @@ func (c *converter) emitSetDefinition(set *syntax.CharSet) string {
 	if _, ok := c.requiredHelpers[fieldName]; !ok {
 		// explicitly using an array in case prefixes is large
 		c.requiredHelpers[fieldName] = fmt.Sprintf(`// The set %v
-		var %v = regexp2.NewCharSetRuntime(%#v)`,
+		var %v = syntax.NewCharSetRuntime(%#v)`,
 			set.String(), fieldName, vals)
 	}
 
@@ -488,7 +488,7 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 			}
 		} else if isSmall, setChars, negated, desc := primarySet.Set.IsUnicodeCategoryOfSmallCharCount(); isSmall {
 			// We have a known set of characters, and we can use the supplied IndexOfAny{Except}(...).
-			fName := "IndexOf"
+			fName := "IndexOfAny"
 			if negated {
 				fName = "IndexOfAnyExcept"
 			}
@@ -598,7 +598,7 @@ func (c *converter) emitFixedSet_RightToLeft(rm *regexpData) {
 			return true
 		}`, set.Chars[0])
 	} else {
-		c.writeLineFmt(`for pos--; pos < r.Runtextend; pos-- {
+		c.writeLineFmt(`for pos--; pos < len(r.Runtext); pos-- {
 			if %v {
 				r.Runtextpos = pos + 1
 				return true
@@ -866,8 +866,8 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 	// it may be cheaper and smaller to compare against each than it is to use a lookup table.  We can also special-case
 	// the very common case with case insensitivity of two characters next to each other being the upper and lowercase
 	// ASCII variants of each other, in which case we can use bit manipulation to avoid a comparison.
-	setChars := make([]rune, 0, 3)
-	setChars = set.GetSetChars(setChars)
+	//setChars := make([]rune, 0, 3)
+	setChars := set.GetSetChars(3)
 	if len(setChars) == 2 {
 		negate = (negate != set.IsNegated())
 		eqStr := "=="
@@ -879,7 +879,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		if mask, ok := differByOneBit(setChars[0], setChars[1]); ok {
 			return fmt.Sprintf("(%s|0x%x %v %q)", chExpr, mask, eqStr, setChars[1]|mask)
 		}
-		return fmt.Sprintf("(%s %s %q %s %[1]s %[2]s %q)", chExpr, eqStr, setChars[0], bitJoin, setChars[1])
+		return fmt.Sprintf("(%s %s %q %s %[1]s %[2]s %[5]q)", chExpr, eqStr, setChars[0], bitJoin, setChars[1])
 	} else if len(setChars) == 3 {
 		negate = (negate != set.IsNegated())
 		eqStr := "=="
@@ -889,9 +889,9 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 			bitJoin = "&&"
 		}
 		if mask, ok := differByOneBit(setChars[0], setChars[1]); ok {
-			return fmt.Sprintf("((%s|0x%x %v %q) %s (%[1]s %[3]s %q)", chExpr, mask, eqStr, setChars[1]|mask, bitJoin, setChars[2])
+			return fmt.Sprintf("((%s|0x%x %v %q) %s (%[1]s %[3]s %[6]q))", chExpr, mask, eqStr, setChars[1]|mask, bitJoin, setChars[2])
 		}
-		return fmt.Sprintf("(%s %s %q %s %[1]s %[2]s %q %[4]s %[1]s %[2]s %q)", chExpr, eqStr, setChars[0], bitJoin, setChars[1], setChars[2])
+		return fmt.Sprintf("(%s %s %q %s %[1]s %[2]s %[5]q %[4]s %[1]s %[2]s %[6]q)", chExpr, eqStr, setChars[0], bitJoin, setChars[1], setChars[2])
 	}
 
 	// Next, handle simple sets of two ASCII letter ranges that are cased versions of each other, e.g. [A-Za-z].
