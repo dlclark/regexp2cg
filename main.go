@@ -31,7 +31,7 @@ func main() {
 	}
 	txt := *expr
 
-	c, err := newConverter(os.Stdout)
+	c, err := newConverter(os.Stdout, "regexp2codegen")
 	if err != nil {
 		log.Fatal(errors.Wrap(err, "code generation error"))
 	}

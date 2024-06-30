@@ -29,20 +29,20 @@ type converter struct {
 	err error
 }
 
-func newConverter(out io.Writer) (*converter, error) {
+func newConverter(out io.Writer, packageName string) (*converter, error) {
 	c := &converter{
 		buf:             &bytes.Buffer{},
 		out:             out,
 		requiredHelpers: make(map[string]string),
 	}
-	if err := c.addHeader(); err != nil {
+	if err := c.addHeader(packageName); err != nil {
 		return nil, err
 	}
 
 	return c, nil
 }
 
-func (c *converter) addHeader() error {
+func (c *converter) addHeader(packageName string) error {
 	// TODO: this
 	// add package and imports
 	/*
@@ -52,12 +52,13 @@ func (c *converter) addHeader() error {
 			"github.com/dlclark/regexp2"
 		)
 	*/
-	c.writeLine("package regexp2codegen")
+	c.writeLineFmt("package %s", packageName)
 	c.writeLine("import (")
 	c.writeLine("  \"github.com/dlclark/regexp2\"")
 	c.writeLine("  \"github.com/dlclark/regexp2/helpers\"")
 	c.writeLine("  \"github.com/dlclark/regexp2/syntax\"")
 	c.writeLine("  \"unicode\"")
+	//c.writeLine("  \"fmt\"")
 	c.writeLine(")")
 
 	return c.err

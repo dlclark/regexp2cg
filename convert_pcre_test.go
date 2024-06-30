@@ -7,13 +7,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/dlclark/regexp2"
 	"github.com/dlclark/regexp2/syntax"
 	"github.com/pkg/errors"
 )
@@ -84,13 +84,13 @@ func TestConversion(t *testing.T) {
 		//subtest
 		t.Run(fmt.Sprintf("pcre %s", pattern), func(t *testing.T) {
 
-			t.Logf("Compile Pattern: %v", pattern)
+			//t.Logf("Compile Pattern: %v", pattern)
 			// we have our raw pattern! -- we need to convert this to a compiled regex
-			re := compileRawPattern(t, pattern)
-
+			reExec := compileRawPattern(t, pattern)
+			//t.Logf("Program created: %v", reExec)
 			var (
 				capsIdx map[int]int
-				m       *regexp2.Match
+				m       string
 				toMatch string
 			)
 			// now we need to parse the test cases if there are any
@@ -113,13 +113,13 @@ func TestConversion(t *testing.T) {
 					// trim off trailing spaces too
 					toMatch = strings.TrimRight(toMatch, " ")
 
-					m = matchString(t, re, toMatch)
+					m = matchString(t, pattern, reExec, toMatch)
 
 					capsIdx = make(map[int]int)
 					continue
 					//t.Fatalf("Expected match text to start with 4 spaces, instead got: '%v'", line)
 				} else if strings.HasPrefix(line, "No match") {
-					validateNoMatch(t, re, m)
+					validateNoMatch(t, pattern, m, toMatch)
 					// no match means we're done
 					continue
 				} else if subs := matchGroup.FindStringSubmatch(line); len(subs) == 3 {
@@ -127,7 +127,7 @@ func TestConversion(t *testing.T) {
 					if _, ok := capsIdx[gIdx]; !ok {
 						capsIdx[gIdx] = 0
 					}
-					validateMatch(t, re, m, toMatch, subs[2], gIdx, capsIdx[gIdx])
+					validateMatch(t, pattern, m, line, toMatch)
 					capsIdx[gIdx]++
 					continue
 				} else {
@@ -150,55 +150,36 @@ func problem(t *testing.T, input string, args ...interface{}) {
 	t.Errorf(input, args...)
 }
 
-func validateNoMatch(t *testing.T, re *regexp2.Regexp, m *regexp2.Match) {
-	if re == nil || m == nil {
+func validateNoMatch(t *testing.T, pattern string, m string, toMatch string) {
+	if len(m) == 0 || m == "No match\n" {
 		return
 	}
 
-	problem(t, "Expected no match for pattern '%v', but got '%v'", re.String(), m.String())
+	problem(t, "Expected no match for pattern '%v' with input '%v', but got '%v'", pattern, toMatch, m)
 }
 
-func validateMatch(t *testing.T, re *regexp2.Regexp, m *regexp2.Match, toMatch, value string, idx, capIdx int) {
-	if re == nil {
+func validateMatch(t *testing.T, pattern string, m string, line, toMatch string) {
+	if len(m) == 0 {
 		// already error'd earlier up stream
 		return
 	}
 
-	if m == nil {
+	if m == "No match\n" {
 		// we didn't match, but should have
-		problem(t, "Expected match for pattern '%v' with input '%v', but got no match", re.String(), toMatch)
+		problem(t, "Expected match for pattern '%v' with input '%v', but got no match", pattern, toMatch)
 		return
 	}
 
-	g := m.Groups()
-	if len(g) <= idx {
-		problem(t, "Expected group %v does not exist in pattern '%v' with input '%v'", idx, re.String(), toMatch)
-		return
-	}
-
-	if value == "<unset>" {
-		// this means we shouldn't have a cap for this group
-		if len(g[idx].Captures) > 0 {
-			problem(t, "Expected no cap %v in group %v in pattern '%v' with input '%v'", g[idx].Captures[capIdx].String(), idx, re.String(), toMatch)
-		}
-
-		return
-	}
-
-	if len(g[idx].Captures) <= capIdx {
-		problem(t, "Expected cap %v does not exist in group %v in pattern '%v' with input '%v'", capIdx, idx, re.String(), toMatch)
-		return
-	}
-
-	escp := unEscapeGroup(g[idx].String())
-	//escp := unEscapeGroup(g[idx].Captures[capIdx].String())
-	if escp != value {
-		problem(t, "Expected '%v' but got '%v' for cap %v, group %v for pattern '%v' with input '%v'", value, escp, capIdx, idx, re.String(), toMatch)
-		return
+	// find our line in our output
+	lines := strings.Split(m, "\n")
+	if !slices.Contains(lines, line) {
+		// we did not find our line in the input
+		problem(t, "Did not find expected line '%s' for pattern '%v' with input '%v'. Got '%s'", line, pattern, toMatch, m)
 	}
 }
 
-func compileRawPattern(t *testing.T, pattern string) *regexp2.Regexp {
+// returns the path to an executable for running tests against this pattern
+func compileRawPattern(t *testing.T, pattern string) string {
 	// check our end for RegexOptions -trim them off
 	index := strings.LastIndexAny(pattern, "/\"")
 	//
@@ -240,18 +221,16 @@ func compileRawPattern(t *testing.T, pattern string) *regexp2.Regexp {
 			problem(t, "PANIC in compiling \"%v\": %v", pattern, rec)
 		}
 	}()
-	//re, err := regexp2.Compile(pattern, opts)
-	generateAndCompile(t, pattern, opts)
 
-	return nil
+	return generateAndCompile(t, pattern, opts)
 }
 
-func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) {
-	f, err := os.CreateTemp("", "*.go")
+func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) string {
+	genPattern, err := os.CreateTemp("", "*.go")
 	if err != nil {
 		panic("could not create tmp file: " + err.Error())
 	}
-	c, err := newConverter(f)
+	c, err := newConverter(genPattern, "main")
 	if err != nil {
 		t.Error(errors.Wrap(err, "code generation error"))
 	}
@@ -263,31 +242,52 @@ func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) 
 	}
 
 	// compile our tmp file
+
+	// get our output file name
+	outFile, _ := os.CreateTemp("", "")
+
+	// get go path
 	goPath, _ := exec.LookPath("go")
-	cmd := exec.Command(goPath, "build", f.Name())
+
+	// customize the main file for this pattern
+	mainFile, _ := os.CreateTemp("", "*.go")
+	origMainFile, _ := filepath.Abs("_runtestmain.go")
+	mainContent, _ := os.ReadFile(origMainFile)
+	mainContent = bytes.Replace(mainContent, []byte("__PATTERN__"), []byte(fmt.Sprintf("%#v", pattern)), 1)
+	mainContent = bytes.Replace(mainContent, []byte("__OPTIONS__"), []byte(fmt.Sprintf("%#v", opts)), 1)
+	mainFile.Write(mainContent)
+
+	// build!
+	cmd := exec.Command(goPath, "build", "-o", outFile.Name(), genPattern.Name(), mainFile.Name())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Log(string(out))
 		t.Errorf("build error for pattern %v", pattern)
+		os.Remove(outFile.Name())
+		return ""
 	}
+
+	// our executable!
+	return outFile.Name()
 }
 
-func matchString(t *testing.T, re *regexp2.Regexp, toMatch string) *regexp2.Match {
-	if re == nil {
-		return nil
+func matchString(t *testing.T, pattern string, reExec string, toMatch string) string {
+	if len(reExec) == 0 {
+		return ""
 	}
-
-	re.MatchTimeout = time.Second * 1
 
 	escp := ""
 	var err error
 	if toMatch != "\\" {
-		escp = unEscapeToMatch(toMatch)
+		escp = toMatch // unEscapeToMatch(toMatch)
 	}
-	m, err := re.FindStringMatch(escp)
+	//t.Logf("Testing: %v", escp)
+	cmd := exec.Command(reExec, escp)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		problem(t, "Error matching \"%v\" in pattern \"%v\": %v", toMatch, re.String(), err)
+		problem(t, "Error matching \"%v\" in pattern \"%v\": %v", toMatch, pattern, err)
 	}
-	return m
+	//t.Logf("Result: %v", string(out))
+	return string(out)
 }
 
 func containsEnder(line string, ender byte, allowFirst bool) bool {
@@ -298,145 +298,4 @@ func containsEnder(line string, ender byte, allowFirst bool) bool {
 		return true
 	}
 	return false
-}
-
-func unEscapeToMatch(line string) string {
-	idx := strings.IndexRune(line, '\\')
-	// no slashes means no unescape needed
-	if idx == -1 {
-		return line
-	}
-
-	buf := bytes.NewBufferString(line[:idx])
-	// get the runes for the rest of the string -- we're going full parser scan on this
-
-	inEscape := false
-	// take any \'s and convert them
-	for i := idx; i < len(line); i++ {
-		ch := line[i]
-		if ch == '\\' {
-			if inEscape {
-				buf.WriteByte(ch)
-			}
-			inEscape = !inEscape
-			continue
-		}
-		if inEscape {
-			switch ch {
-			case 'x':
-				buf.WriteByte(scanHex(line, &i))
-			case 'a':
-				buf.WriteByte(0x07)
-			case 'b':
-				buf.WriteByte('\b')
-			case 'e':
-				buf.WriteByte(0x1b)
-			case 'f':
-				buf.WriteByte('\f')
-			case 'n':
-				buf.WriteByte('\n')
-			case 'r':
-				buf.WriteByte('\r')
-			case 't':
-				buf.WriteByte('\t')
-			case 'v':
-				buf.WriteByte(0x0b)
-			default:
-				if ch >= '0' && ch <= '7' {
-					buf.WriteByte(scanOctal(line, &i))
-				} else {
-					buf.WriteByte(ch)
-					//panic(fmt.Sprintf("unexpected escape '%v' in %v", string(ch), line))
-				}
-			}
-			inEscape = false
-		} else {
-			buf.WriteByte(ch)
-		}
-	}
-
-	return buf.String()
-}
-
-func unEscapeGroup(val string) string {
-	// use hex for chars 0x00-0x1f, 0x7f-0xff
-	buf := &bytes.Buffer{}
-
-	for i := 0; i < len(val); i++ {
-		ch := val[i]
-		if ch <= 0x1f || ch >= 0x7f {
-			//write it as a \x00
-			fmt.Fprintf(buf, "\\x%.2x", ch)
-		} else {
-			// write as-is
-			buf.WriteByte(ch)
-		}
-	}
-
-	return buf.String()
-}
-
-func scanHex(line string, idx *int) byte {
-	if *idx >= len(line)-2 {
-		panic(fmt.Sprintf("not enough hex chars in %v at %v", line, *idx))
-	}
-	(*idx)++
-	d1 := hexDigit(line[*idx])
-	(*idx)++
-	d2 := hexDigit(line[*idx])
-	if d1 < 0 || d2 < 0 {
-		panic("bad hex chars")
-	}
-
-	return byte(d1*0x10 + d2)
-}
-
-// Returns n <= 0xF for a hex digit.
-func hexDigit(ch byte) int {
-
-	if d := uint(ch - '0'); d <= 9 {
-		return int(d)
-	}
-
-	if d := uint(ch - 'a'); d <= 5 {
-		return int(d + 0xa)
-	}
-
-	if d := uint(ch - 'A'); d <= 5 {
-		return int(d + 0xa)
-	}
-
-	return -1
-}
-
-// Scans up to three octal digits (stops before exceeding 0377).
-func scanOctal(line string, idx *int) byte {
-	// Consume octal chars only up to 3 digits and value 0377
-
-	// octals can be 3,2, or 1 digit
-	c := 3
-
-	if diff := len(line) - *idx; c > diff {
-		c = diff
-	}
-
-	i := 0
-	d := int(line[*idx] - '0')
-	for c > 0 && d <= 7 {
-		i *= 8
-		i += d
-
-		c--
-		(*idx)++
-		if *idx < len(line) {
-			d = int(line[*idx] - '0')
-		}
-	}
-	(*idx)--
-
-	// Octal codes only go up to 255.  Any larger and the behavior that Perl follows
-	// is simply to truncate the high bits.
-	i &= 0xFF
-
-	return byte(i)
 }

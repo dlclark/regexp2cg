@@ -11,6 +11,7 @@ import (
 
 func (c *converter) emitFindFirstChar(rm *regexpData) {
 	c.writeLineFmt("func (%s_Engine) FindFirstChar(r *regexp2.Runner) bool {", rm.GeneratedName)
+	//c.writeLine(`fmt.Println("FindFirstChar")`)
 	defer func() {
 		c.writeLine("}\n")
 	}()
@@ -331,7 +332,7 @@ func (c *converter) emitIndexOfString_LeftToRight(rm *regexpData) {
 	c.writeLineFmt(`// The pattern has the literal %#v %v. Find the next occurrence.
 	// If it can't be found, there's no match
 	if i := helpers.IndexOf%v(r.Runtext[pos%v:], %s); i >= 0 {
-		r.Runtextpos = i
+		r.Runtextpos = pos + i
 		return true
 	}`, substring, offsetDescription, stringComparison, offset, getRuneSliceLiteral(substring))
 }
@@ -386,14 +387,13 @@ func (c *converter) emitIndexOfStrings_LeftToRight(rm *regexpData) {
 	c.writeLineFmt(`// The pattern has multiple strings that could begin the match. Search for any of them.
 	// If none can be found, there's no match
 	if i := %v.IndexOfAny(r.Runtext[pos:]); i >= 0 {
-		r.Runtextpos = i
+		r.Runtextpos = pos + i
 		return true
 	}`, fieldName)
 }
 
 func (c *converter) emitSetDefinition(set *syntax.CharSet) string {
-	var hash []byte
-	set.HashInto(hash)
+	hash := set.Hash()
 	vals := string(hash)
 
 	fieldName := fmt.Sprint("set_", getSHA256FieldName(vals))
@@ -537,7 +537,7 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 		} else {
 			c.writeLineFmt(`i := %v
 						if i >= 0 {
-							r.Runtextpos = pos+i
+							r.Runtextpos = pos + i
 							return true
 						}
 						`, indexOf)
@@ -574,7 +574,7 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 			c.writeLine(` {`)
 			endBlock2 = "}"
 		}
-		c.writeLine(`r.Runtextpos = pos+i
+		c.writeLine(`r.Runtextpos = pos + i
 						return true`)
 		c.writeLine(endBlock2)
 	}
@@ -665,7 +665,7 @@ func (c *converter) emitLiteralAfterAtomicLoop(rm *regexpData) {
 
 	// We found the literal.  Walk backwards from it finding as many matches as we can against the loop.
 	c.writeLineFmt(`prev := i - 1
-		for prev < len(slice) && %v {
+		for uint(prev) < uint(len(slice)) && %v {
 			prev--
 		}
 		`, c.emitMatchCharacterClass(rm, target.LoopNode.Set, false, "slice[prev]"))
@@ -909,7 +909,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 			if negate {
 				op = ">"
 			}
-			return fmt.Sprintf("((%s|0x20 - %q) %s (%q - %q))", chExpr, ranges[1].First, op, ranges[1].Last, ranges[1].First)
+			return fmt.Sprintf("(uint(%s|0x20 - %q) %s uint(%q - %q))", chExpr, ranges[1].First, op, ranges[1].Last, ranges[1].First)
 		}
 	}
 

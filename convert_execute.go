@@ -17,6 +17,7 @@ const MaxUnrollSize = 16
 
 func (c *converter) emitExecute(rm *regexpData) {
 	c.writeLineFmt("func (%s_Engine) Execute(r *regexp2.Runner) error {", rm.GeneratedName)
+	//c.writeLine(`fmt.Println("Execute")`)
 	defer func() {
 		c.writeLine("}\n")
 	}()
@@ -472,13 +473,13 @@ func getSubsequentOrDefault(index int, node *syntax.RegexNode, defaultNode *synt
 func (c *converter) emitExecuteMultiCharString(rm *regexpData, str []rune, emitLengthCheck bool, clauseOnly bool, rightToLeft bool) {
 
 	if rightToLeft {
-		c.writeLineFmt("if pos - %v >= len(r.Runtext) {", len(str))
+		c.writeLineFmt("if lastIdx := pos - %v; lastIdx < 0 || lastIdx >= len(r.Runtext) {", len(str))
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}\n")
 
 		c.writeLineFmt(`for i:=0; i < %v; i++ {
 						pos--
-						if r.Runtext[pos] != %s[%[1]v - i] {`, len(str), getRuneSliceLiteral(str))
+						if r.Runtext[pos] != %s[%v - i] {`, len(str), getRuneSliceLiteral(str), len(str)-1)
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}\n}")
 
@@ -528,7 +529,7 @@ func (c *converter) emitExecuteSingleChar(rm *regexpData, node *syntax.RegexNode
 		} else if !rtl {
 			clause = fmt.Sprintf("if %s || %s {", spanLengthCheck(rm, 1, offset), expr)
 		} else {
-			clause = fmt.Sprintf("if pos - 1 >= len(r.Runtext) || %s {", expr)
+			clause = fmt.Sprintf("if newIdx := pos - 1; newIdx < 0 || newIdx >= len(r.Runtext) || %s {", expr)
 		}
 
 		c.writeLine(clause)
@@ -1197,7 +1198,7 @@ func (c *converter) emitExecuteAtomicSingleCharZeroOrOne(rm *regexpData, node *s
 	} else if rm.sliceStaticPos != 0 {
 		spaceAvailable = fmt.Sprintf("len(%s) > %v", rm.sliceSpan, rm.sliceStaticPos)
 	} else {
-		spaceAvailable = fmt.Sprintf("len(%s) == 0", rm.sliceSpan)
+		spaceAvailable = fmt.Sprintf("len(%s) > 0", rm.sliceSpan)
 	}
 
 	c.writeLineFmt("if %s && %s {", spaceAvailable, expr)
@@ -1253,12 +1254,12 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 	}
 
 	if node.IsSetFamily() {
-		negated := node.Set.IsNegated() != negate
+		negate = node.Set.IsNegated() != negate
 
 		// Prefer IndexOfAnyInRange over IndexOfAny, except for tiny ranges (1 or 2 items) that IndexOfAny handles more efficiently
 		if rs := node.Set.GetIfNRanges(1); len(rs) == 1 && rs[0].Last-rs[0].First > 1 {
 			var expr string
-			if negated {
+			if negate {
 				expr = fmt.Sprintf("helpers.%sIndexOfAnyExceptInRange(%s, %q, %q)", last, spanName, rs[0].First, rs[0].Last)
 			} else {
 				expr = fmt.Sprintf("helpers.%sIndexOfAnyInRange(%s, %q, %q)", last, spanName, rs[0].First, rs[0].Last)
@@ -2158,6 +2159,7 @@ func (c *converter) emitExecuteAlternation(rm *regexpData, node *syntax.RegexNod
 					remainder.ReplaceChild(0, &syntax.RegexNode{T: syntax.NtEmpty, Options: remainder.Options})
 					goto HandleChild // reprocess just the first node that was saved; the remainder will then be processed below
 				}
+				fallthrough
 			default:
 				remainder = child
 			}
@@ -2399,16 +2401,21 @@ func (c *converter) emitBackrefWhenHasCapture(rm *regexpData, node *syntax.Regex
 	rm.addLocalDec("matchLength := 0")
 	c.writeLineFmt("matchLength = r.MatchLength(%v)", capnum)
 
+	ignoreCase := ""
+	if node.Options&syntax.IgnoreCase != 0 {
+		ignoreCase = "IgnoreCase"
+	}
+
 	// Validate that the remaining length of the slice is sufficient
 	// to possibly match, and then do a SequenceEqual against the matched text.
 	if (node.Options & syntax.RightToLeft) == 0 {
-		c.writeLineFmt("if len(%s) < matchLength || !helpers.Equals(r.Runtext, r.MatchIndex(%v), matchLength, %[1]s[:matchLength]) {",
-			rm.sliceSpan, capnum)
+		c.writeLineFmt("if len(%s) < matchLength || !helpers.Equals%s(r.Runtext, r.MatchIndex(%v), matchLength, %[1]s[:matchLength]) {",
+			rm.sliceSpan, ignoreCase, capnum)
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}\npos += matchLength")
 	} else {
-		c.writeLineFmt("if pos < matchLength || !helpers.Equals(r.Runtext, r.MatchIndex(%v), matchLength, r.Runtext[pos-matchLength:pos]) {",
-			capnum)
+		c.writeLineFmt("if pos < matchLength || !helpers.Equals%s(r.Runtext, r.MatchIndex(%v), matchLength, r.Runtext[pos-matchLength:pos]) {",
+			ignoreCase, capnum)
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}\npos -= matchLength")
 	}
@@ -2900,7 +2907,7 @@ func (c *converter) emitExecuteNegativeLookaroundAssertion(rm *regexpData, node 
 		if isInLoop {
 			c.emitStackPush(stackCookie, "r.Crawlpos()")
 		} else {
-			capturePos = rm.reserveName(fmt.Sprint(variablePrefix, "_capture_pos"))
+			capturePos = rm.reserveName(fmt.Sprint(variablePrefix, "capture_pos"))
 			rm.addLocalDec(fmt.Sprint(capturePos, " := 0"))
 			c.writeLineFmt("%s = r.Crawlpos()", capturePos)
 		}
