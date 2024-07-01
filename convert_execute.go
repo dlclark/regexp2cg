@@ -1324,6 +1324,7 @@ func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 		} else {
 			c.writeLine("if (pos < len(r.Runtext) - 1) || (pos < len(r.Runtext) && r.Runtext[pos] != '\\n') {")
 		}
+
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}")
 
