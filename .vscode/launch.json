@@ -11,10 +11,7 @@
             "request": "launch",
             "mode": "debug",
             "program": ".",
-            "args": ["-expr", "(?'abc'\\w+):\\k<abc>{2}", "-opt", "0"]
-            //[[:abcd:xyz]]
-            //(?'abc'\\w+):\\k<abc>{2}
-
+            "args": [], //["-expr", "(?'abc'\\w+):\\k<abc>{2}", "-opt", "0"]
         },
         {
             "name": "Test PCRE",

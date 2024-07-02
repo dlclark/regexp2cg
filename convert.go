@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"go/format"
+	"strconv"
 
 	"fmt"
 	"io"
@@ -26,6 +27,8 @@ type converter struct {
 	// global helpers across the package
 	requiredHelpers map[string]string
 
+	convertedNames map[string]int
+
 	err error
 }
 
@@ -34,6 +37,7 @@ func newConverter(out io.Writer, packageName string) (*converter, error) {
 		buf:             &bytes.Buffer{},
 		out:             out,
 		requiredHelpers: make(map[string]string),
+		convertedNames:  make(map[string]int),
 	}
 	if err := c.addHeader(packageName); err != nil {
 		return nil, err
@@ -79,7 +83,7 @@ func (c *converter) addFooter() error {
 	// emit init func
 	c.writeLine("func init() {")
 	for _, rm := range c.data {
-		c.writeLineFmt("regexp2.RegisterEngine(%v, %v, &%s_Engine{})", getGoLiteral(rm.Pattern), rm.Options, rm.GeneratedName)
+		c.writeLineFmt("regexp2.RegisterEngine(%v, %v, &%s_Engine{})", getGoLiteral(rm.Pattern), getOptString(rm.Options), rm.GeneratedName)
 	}
 	// emit basic usage of imports so we don't have to deal with import re-writing
 	c.writeLine("var _ = helpers.Min")
@@ -153,7 +157,15 @@ func (rm *regexpData) addLocalDec(dec string) {
 }
 
 func (c *converter) addRegexp(sourceLocation, name string, txt string, opt syntax.RegexOptions) error {
-	// parse it
+	// check if already converted
+	for _, data := range c.data {
+		// match!  we're done here
+		if data.Pattern == txt && data.Options == opt {
+			return nil
+		}
+	}
+
+	// parse pattern
 	tree, err := syntax.Parse(txt, opt|syntax.Compiled)
 	if err != nil {
 		return errors.Wrap(err, "error parsing regexp")
@@ -161,6 +173,20 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	if err := supportsCodeGen(tree); err != nil {
 		return errors.Wrap(err, "code generation not supported")
 	}
+
+	// generate unique class name
+	newName := name
+	for {
+		if _, ok := c.convertedNames[newName]; ok {
+			// name already exists, increment the number on the base name and try again
+			c.convertedNames[name]++
+			val := c.convertedNames[name]
+			newName = fmt.Sprint(name, "_", val)
+		} else {
+			break
+		}
+	}
+	c.convertedNames[newName] = 1
 
 	oldOut := c.buf
 	buf := &bytes.Buffer{}
@@ -170,7 +196,7 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 
 	rm := &regexpData{
 		SourceLocation: sourceLocation,
-		GeneratedName:  name,
+		GeneratedName:  newName,
 		Pattern:        txt,
 		Options:        opt,
 		Tree:           tree,
@@ -229,13 +255,53 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 
 	c.writeLineFmt("// From %s", rm.SourceLocation)
 	c.writeLineFmt("// Pattern: %#v", rm.Pattern)
-	c.writeLineFmt("// Options: %v", rm.Options)
+	c.writeLineFmt("// Options: %v", getOptString(rm.Options))
 	c.writeLineFmt("type %s_Engine struct{}", rm.GeneratedName)
 	c.writeLineFmt("func (%s_Engine) Caps() map[int]int { return %s }", rm.GeneratedName, getGoLiteral(caps))
 	c.writeLineFmt("func (%s_Engine) CapNames() map[string]int { return %s }", rm.GeneratedName, getGoLiteral(rm.Tree.Capnames))
 	c.writeLineFmt("func (%s_Engine) CapsList() []string { return %s }", rm.GeneratedName, getGoLiteral(rm.Tree.Caplist))
 	c.writeLineFmt("func (%s_Engine) CapSize() int { return %v }", rm.GeneratedName, capsize)
 	c.writeLine("")
+}
+
+var optNames = []string{
+	"IgnoreCase",
+	"Multiline",
+	"ExplicitCapture",
+	"Compiled",
+	"Singleline",
+	"IgnorePatternWhitespace",
+	"RightToLeft",
+	"Debug",
+	"ECMAScript",
+	"RE2",
+	"Unicode",
+}
+
+func getOptString(opts syntax.RegexOptions) string {
+	if opts == 0 {
+		return "regexp2.None"
+	}
+
+	stringOpts := []string{}
+	remain := int(opts)
+	for i, v := range optNames {
+		//bit := i + 1
+		mask := 1 << i
+		// check if this bit is enabled in opts
+		if remain&mask != 0 {
+			remain &= ^mask
+			stringOpts = append(stringOpts, "regexp2."+v)
+		}
+		// once we're out of options, stop looping
+		if remain == 0 {
+			break
+		}
+	}
+	if remain > 0 {
+		stringOpts = append(stringOpts, strconv.Itoa(remain))
+	}
+	return strings.Join(stringOpts, "|")
 }
 
 func isNilish(val any) bool {
