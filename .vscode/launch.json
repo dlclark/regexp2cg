@@ -11,7 +11,7 @@
             "request": "launch",
             "mode": "debug",
             "program": ".",
-            "args": [], //["-expr", "(?'abc'\\w+):\\k<abc>{2}", "-opt", "0"]
+            "args": ["-path", "../regex-redux", "-o", "../regex-redux/testing.go" ], //["-expr", "(?'abc'\\w+):\\k<abc>{2}", "-opt", "0"]
         },
         {
             "name": "Test PCRE",

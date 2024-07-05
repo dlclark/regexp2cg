@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -33,25 +34,12 @@ var out = flag.String("o", "", "output file to write generated regexp code into,
 func main() {
 	flag.Parse()
 
-	var outStream io.Writer
-	if out == nil || len(*out) == 0 {
-		outStream = os.Stdout
-	} else {
-		outStream, err := os.Create(*out)
-		if err != nil {
-			log.Fatalf("error creating out file: %v", err)
-		}
-		defer func() {
-			outStream.Close()
-		}()
-	}
-
 	if expr != nil && len(*expr) > 0 {
 		options := syntax.RegexOptions(0)
 		if opt != nil {
 			options = syntax.RegexOptions(*opt)
 		}
-		convertSingle(*expr, options, *pkg, outStream)
+		convertSingle(*expr, options, *pkg)
 		return
 	}
 
@@ -60,15 +48,34 @@ func main() {
 		convPath, _ = filepath.Abs(*path)
 	}
 
-	convertPath(convPath, *tests, outStream)
+	convertPath(convPath, *tests)
 }
 
-func convertSingle(expr string, opts syntax.RegexOptions, pkg string, out io.Writer) {
-	c, err := newConverter(out, pkg)
+func getOutStream() (io.Writer, string) {
+	outPath := ""
+	if out == nil || len(*out) == 0 {
+		return os.Stdout, ""
+	}
+
+	outPath, _ = filepath.Abs(*out)
+	file, err := os.Create(outPath)
+	if err != nil {
+		log.Fatalf("error creating out file: %v", err)
+	}
+
+	return file, outPath
+}
+
+func convertSingle(expr string, opts syntax.RegexOptions, pkg string) {
+	stream, _ := getOutStream()
+	if stream == nil {
+		log.Fatalf("unable to open output")
+	}
+	c, err := newConverter(stream, pkg)
 	if err != nil {
 		log.Fatal(errors.Wrap(err, "code generation error"))
 	}
-	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", expr, opts); err != nil {
+	if err := c.addRegexp("command line", "MyPattern", expr, opts); err != nil {
 		log.Fatal(errors.Wrap(err, "code generation error"))
 	}
 	if err := c.addFooter(); err != nil {
@@ -76,7 +83,7 @@ func convertSingle(expr string, opts syntax.RegexOptions, pkg string, out io.Wri
 	}
 }
 
-func convertPath(path string, includeTest bool, out io.Writer) {
+func convertPath(path string, includeTest bool) {
 	log.Printf("Create regexp for path %s, include tests=%v", path, includeTest)
 	//Create a FileSet to work with
 	fset := token.NewFileSet()
@@ -97,6 +104,8 @@ func convertPath(path string, includeTest bool, out io.Writer) {
 
 	var alias string
 	var c *converter
+	var stream io.Writer
+	var outFile string
 	for p, pkg := range pkgs {
 		for f, file := range pkg.Files {
 			if !importsRegexp2(file, &alias) {
@@ -117,15 +126,21 @@ func convertPath(path string, includeTest bool, out io.Writer) {
 					for i, val := range varDec.Values {
 						ok, pat, opt, pos := isStaticCompileCall(val, alias)
 						if ok {
+							fset.Position(pos).String()
+							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
 							// first find inits a converter
 							if c == nil {
-								c, err = newConverter(out, p)
+								stream, outFile = getOutStream()
+								if stream == nil {
+									log.Fatalf("unable to open output")
+								}
+								c, err = newConverter(stream, p)
 								if err != nil {
 									log.Fatal(errors.Wrap(err, "code generation error"))
 								}
 							}
 
-							if err := c.addRegexp(fset.Position(pos).String(), getName(varDec.Names[i]), pat, syntax.RegexOptions(opt)); err != nil {
+							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(varDec.Names[i]), pat, syntax.RegexOptions(opt)); err != nil {
 								log.Fatal(errors.Wrap(err, "code generation error"))
 							}
 						}
@@ -134,15 +149,20 @@ func convertPath(path string, includeTest bool, out io.Writer) {
 					for i, exp := range assign.Rhs {
 						ok, pat, opt, pos := isStaticCompileCall(exp, alias)
 						if ok {
+							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
 							// first find inits a converter
 							if c == nil {
-								c, err = newConverter(out, p)
+								stream, outFile = getOutStream()
+								if stream == nil {
+									log.Fatalf("unable to open output")
+								}
+								c, err = newConverter(stream, p)
 								if err != nil {
 									log.Fatal(errors.Wrap(err, "code generation error"))
 								}
 							}
 
-							if err := c.addRegexp(fset.Position(pos).String(), getName(assign.Lhs[i]), pat, syntax.RegexOptions(opt)); err != nil {
+							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(assign.Lhs[i]), pat, syntax.RegexOptions(opt)); err != nil {
 								log.Fatal(errors.Wrap(err, "code generation error"))
 							}
 						}
@@ -158,6 +178,22 @@ func convertPath(path string, includeTest bool, out io.Writer) {
 			log.Fatal(errors.Wrap(err, "code generation error"))
 		}
 	}
+}
+
+// returns a location in the fileset relative to the output path given
+// or pwd if output path is blank
+func getLocation(fset *token.FileSet, pos token.Pos, outPath string) string {
+	fullPos := fset.Position(pos)
+
+	//make filename relative to our pwd
+	if outPath == "" {
+		outPath, _ = os.Getwd()
+	} else {
+		outPath = filepath.Dir(outPath)
+	}
+
+	file, _ := filepath.Rel(outPath, fullPos.Filename)
+	return fmt.Sprint(file, ":", fullPos.Line, ":", fullPos.Column)
 }
 
 func getName(lhs ast.Node) string {

@@ -189,10 +189,9 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	c.convertedNames[newName] = 1
 
 	oldOut := c.buf
-	buf := &bytes.Buffer{}
-	c.buf = buf
+	c.buf = &bytes.Buffer{}
 
-	c.writeLineFmt("/*\n%s\n*/", tree.Dump())
+	c.writeLineFmt("/*\n%s*/", tree.Dump())
 
 	rm := &regexpData{
 		SourceLocation: sourceLocation,
@@ -212,7 +211,7 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	c.emitExecute(rm)
 
 	// get our string for final manipulation
-	output := buf.String()
+	output := c.buf.String()
 	c.buf = oldOut
 
 	// finalize our code
