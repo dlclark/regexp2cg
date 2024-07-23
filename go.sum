@@ -1,2 +1,4 @@
+github.com/dlclark/regexp2 v1.11.1-0.20240706002540-f5f79a46e241 h1:tdmAsILCdj0TcUrYGU+GigSbtsl0ouA0O7+GXgmMzg0=
+github.com/dlclark/regexp2 v1.11.1-0.20240706002540-f5f79a46e241/go.mod h1:YvCrhrh/qlds8EhFKPtJprdXn5fWBllSw1qo99dZyiQ=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
