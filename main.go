@@ -205,34 +205,60 @@ func getName(lhs ast.Node) string {
 }
 
 func isStaticCompileCall(n ast.Node, importAlias string) (ok bool, pattern string, opts int, patternPos token.Pos) {
+	funcCall, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false, "", 0, 0
+	}
 
-	if funcCall, ok := n.(*ast.CallExpr); ok {
-		//wrong number of args, can't be us
-		if len(funcCall.Args) != 2 {
+	if len(funcCall.Args) < 1 || len(funcCall.Args) > 2 {
+		return false, "", 0, 0
+	}
+
+	if match, _ := isSelector(funcCall.Fun, importAlias, "MustCompile", "Compile"); match {
+		pattern, ok = extractPattern(funcCall.Args[0])
+		if !ok {
 			return false, "", 0, 0
 		}
-		if ok, _ := isSelector(funcCall.Fun, importAlias, "MustCompile", "Compile"); ok {
-			// get our pattern, the options, if they're both literals (or known constants)
-			// then we're good
-			pat, ok := funcCall.Args[0].(*ast.BasicLit)
-			if !ok {
-				return false, "", 0, 0
-			}
-			// our pattern
-			pattern, _ = strconv.Unquote(pat.Value)
 
-			// handle options as int constant
-			opts, ok = getOpts(funcCall.Args[1], importAlias)
-			if !ok {
-				return false, "", 0, 0
+		opts = 0 // Default options
+		if len(funcCall.Args) == 2 {
+			tmpOpts, ok := getOpts(funcCall.Args[1], importAlias)
+			if ok {
+				opts = tmpOpts
 			}
-
-			// it parsed!
-			return true, pattern, opts, funcCall.Args[0].Pos()
 		}
+
+		return true, pattern, opts, funcCall.Args[0].Pos()
 	}
 
 	return false, "", 0, 0
+}
+
+func extractPattern(arg ast.Expr) (pattern string, ok bool) {
+	switch v := arg.(type) {
+	case *ast.BasicLit: // Direct string literal
+		if v.Kind == token.STRING {
+			pattern, _ = strconv.Unquote(v.Value) // Extract string
+			return pattern, true
+		}
+	case *ast.BinaryExpr: // Concatenated strings
+		// it does work here but the code for loading the pre-compiled regexp doesn't work with it, left it for future
+		left, ok1 := extractPattern(v.X)
+		right, ok2 := extractPattern(v.Y)
+		if ok1 && ok2 {
+			return left + right, true
+		}
+	case *ast.Ident: // Constant or variable
+		// Example: const myPattern = "pattern"
+		if v.Obj != nil && v.Obj.Kind == ast.Con {
+			if valueSpec, ok := v.Obj.Decl.(*ast.ValueSpec); ok {
+				if len(valueSpec.Values) > 0 {
+					return extractPattern(valueSpec.Values[0])
+				}
+			}
+		}
+	}
+	return "", false // Unsupported type
 }
 
 func getOpts(node ast.Node, importAlias string) (int, bool) {
