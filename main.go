@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"io"
@@ -76,7 +78,7 @@ func convertSingle(expr string, opts syntax.RegexOptions, pkg string) {
 	if err != nil {
 		log.Fatal(errors.Wrap(err, "code generation error"))
 	}
-	if err := c.addRegexp("command line", "MyPattern", expr, opts); err != nil {
+	if err := c.addRegexp("command line", "MyPattern", expr, opts, false, []string{getOptString(opts)}); err != nil {
 		log.Fatal(errors.Wrap(err, "code generation error"))
 	}
 	if err := c.addFooter(); err != nil {
@@ -125,7 +127,7 @@ func convertPath(path string, includeTest bool) {
 				if varDec, ok := n.(*ast.ValueSpec); ok {
 					// var dec
 					for i, val := range varDec.Values {
-						ok, pat, opt, pos, err := isStaticCompileCall(val, alias)
+						ok, pat, opt, compileOptions, maintainCaptureOrder, pos, err := isStaticCompileCall(val, alias)
 						if err != nil {
 							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
 						}
@@ -144,14 +146,14 @@ func convertPath(path string, includeTest bool) {
 								}
 							}
 
-							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(varDec.Names[i]), pat, syntax.RegexOptions(opt)); err != nil {
+							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(varDec.Names[i]), pat, syntax.RegexOptions(opt), maintainCaptureOrder, compileOptions); err != nil {
 								log.Fatal(errors.Wrap(err, "code generation error"))
 							}
 						}
 					}
 				} else if assign, ok := n.(*ast.AssignStmt); ok {
 					for i, exp := range assign.Rhs {
-						ok, pat, opt, pos, err := isStaticCompileCall(exp, alias)
+						ok, pat, opt, compileOptions, maintainCaptureOrder, pos, err := isStaticCompileCall(exp, alias)
 						if err != nil {
 							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
 						}
@@ -169,7 +171,7 @@ func convertPath(path string, includeTest bool) {
 								}
 							}
 
-							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(assign.Lhs[i]), pat, syntax.RegexOptions(opt)); err != nil {
+							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(assign.Lhs[i]), pat, syntax.RegexOptions(opt), maintainCaptureOrder, compileOptions); err != nil {
 								log.Fatal(errors.Wrap(err, "code generation error"))
 							}
 						}
@@ -211,45 +213,66 @@ func getName(lhs ast.Node) string {
 	return ""
 }
 
-func isStaticCompileCall(n ast.Node, importAlias string) (ok bool, pattern string, opts int, patternPos token.Pos, err error) {
+func isStaticCompileCall(n ast.Node, importAlias string) (ok bool, pattern string, opts int, compileOptions []string, maintainCaptureOrder bool, patternPos token.Pos, err error) {
 	funcCall, ok := n.(*ast.CallExpr)
 	if !ok {
-		return false, "", 0, 0, nil
+		return false, "", 0, nil, false, 0, nil
 	}
 
 	if len(funcCall.Args) < 1 {
-		return false, "", 0, 0, nil
+		return false, "", 0, nil, false, 0, nil
 	}
 
 	if match, _ := isSelector(funcCall.Fun, importAlias, "MustCompile", "Compile"); match {
 		pattern, ok = extractPattern(funcCall.Args[0])
 		if !ok {
-			return false, "", 0, 0, nil
+			return false, "", 0, nil, false, 0, nil
 		}
 
 		opts = 0 // Default options
 		for _, arg := range funcCall.Args[1:] {
+			compileOption, err := getCompileOptionExpr(arg, importAlias)
+			if err != nil {
+				return false, "", 0, nil, false, arg.Pos(), err
+			}
+
 			tmpOpts, ok := getOpts(arg, importAlias)
 			if ok {
 				opts |= tmpOpts
+				compileOptions = append(compileOptions, compileOption)
 				continue
 			}
 
-			knownCompileOption, err := isKnownNonRegexCompileOption(arg, importAlias)
+			knownCompileOption, isMaintainCaptureOrder, err := isKnownNonRegexCompileOption(arg, importAlias)
 			if err != nil {
-				return false, "", 0, arg.Pos(), err
+				return false, "", 0, nil, false, arg.Pos(), err
 			}
 			if knownCompileOption {
+				compileOptions = append(compileOptions, compileOption)
+				maintainCaptureOrder = maintainCaptureOrder || isMaintainCaptureOrder
 				continue
 			}
 
-			return false, "", 0, 0, nil
+			return false, "", 0, nil, false, 0, nil
 		}
 
-		return true, pattern, opts, funcCall.Args[0].Pos(), nil
+		return true, pattern, opts, compileOptions, maintainCaptureOrder, funcCall.Args[0].Pos(), nil
 	}
 
-	return false, "", 0, 0, nil
+	return false, "", 0, nil, false, 0, nil
+}
+
+func getCompileOptionExpr(node ast.Node, importAlias string) (string, error) {
+	var buf bytes.Buffer
+	if err := format.Node(&buf, token.NewFileSet(), node); err != nil {
+		return "", err
+	}
+
+	expr := buf.String()
+	if importAlias != "" && importAlias != "regexp2" {
+		expr = strings.ReplaceAll(expr, importAlias+".", "regexp2.")
+	}
+	return expr, nil
 }
 
 func extractPattern(arg ast.Expr) (pattern string, ok bool) {
@@ -333,24 +356,27 @@ func getOpts(node ast.Node, importAlias string) (int, bool) {
 	return 0, false
 }
 
-func isKnownNonRegexCompileOption(node ast.Node, importAlias string) (bool, error) {
+func isKnownNonRegexCompileOption(node ast.Node, importAlias string) (bool, bool, error) {
 	call, ok := node.(*ast.CallExpr)
 	if !ok {
-		return false, nil
+		return false, false, nil
 	}
 
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
 		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == importAlias {
+			if sel.Sel.Name == "OptionMaintainCaptureOrder" {
+				return true, true, nil
+			}
 			if slices.Contains(runtimeCompileOptionNames, sel.Sel.Name) || slices.Contains(skippedCompileOptionNames, sel.Sel.Name) {
-				return true, nil
+				return true, false, nil
 			}
 			if strings.HasPrefix(sel.Sel.Name, "Option") {
-				return false, fmt.Errorf("unknown regexp2 compile option %s", sel.Sel.Name)
+				return false, false, fmt.Errorf("unknown regexp2 compile option %s", sel.Sel.Name)
 			}
 		}
 	}
 
-	return false, nil
+	return false, false, nil
 }
 
 func convertOptsNameToInt(name string) (int, bool) {

@@ -234,7 +234,7 @@ func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) 
 	if err != nil {
 		t.Error(errors.Wrap(err, "code generation error"))
 	}
-	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", pattern, opts); err != nil {
+	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", pattern, opts, false, []string{getOptString(opts)}); err != nil {
 		t.Error(errors.Wrap(err, "code generation error"))
 	}
 	if err := c.addFooter(); err != nil {

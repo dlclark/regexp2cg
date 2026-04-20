@@ -16,7 +16,7 @@ import (
 const MaxUnrollSize = 16
 
 func (c *converter) emitExecute(rm *regexpData) {
-	c.writeLineFmt("func (%s_Engine) Execute(r *regexp2.Runner) error {", rm.GeneratedName)
+	c.writeLineFmt("func %s_Execute(r *regexp2.Runner) error {", rm.GeneratedName)
 	//c.writeLine(`fmt.Println("Execute")`)
 	defer func() {
 		c.writeLine("}\n")

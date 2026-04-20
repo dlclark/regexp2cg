@@ -71,7 +71,7 @@ func (c *converter) addHeader(packageName string) error {
 func (c *converter) addFooter() error {
 	/*
 			func init() {
-				regexp2.RegisterEngine("ABCD+", regexp2.ECMAScript, regexp2.RuntimeEngineData{...})
+				regexp2.RegisterEngine("ABCD+", regexp2.RuntimeEngineData{...}, regexp2.ECMAScript)
 		   }
 	*/
 
@@ -83,21 +83,25 @@ func (c *converter) addFooter() error {
 	// emit init func
 	c.writeLine("func init() {")
 	for _, rm := range c.data {
-		c.writeLineFmt(`regexp2.RegisterEngine(%v, %v, regexp2.RuntimeEngineData{
+		compileOptions := ""
+		if len(rm.CompileOptions) > 0 {
+			compileOptions = ", " + strings.Join(rm.CompileOptions, ", ")
+		}
+		c.writeLineFmt(`regexp2.RegisterEngine(%v, regexp2.RuntimeEngineData{
 	Caps: %v,
 	CapNames: %v,
 	CapsList: %v,
 	CapSize: %v,
-	FindFirstChar: (%s_Engine{}).FindFirstChar,
-	Execute: (%[7]s_Engine{}).Execute,
-})`,
+	FindFirstChar: %s_FindFirstChar,
+	Execute: %[6]s_Execute,
+}%[7]s)`,
 			getGoLiteral(rm.Pattern),
-			getOptString(rm.Options),
 			getGoLiteral(rm.Tree.Caps),
 			getGoLiteral(rm.Tree.Capnames),
 			getGoLiteral(rm.Tree.Caplist),
 			rm.Tree.Captop,
-			rm.GeneratedName)
+			rm.GeneratedName,
+			compileOptions)
 	}
 	// emit basic usage of imports so we don't have to deal with import re-writing
 	c.writeLine("var _ = helpers.Min")
@@ -123,8 +127,11 @@ type regexpData struct {
 	GeneratedName  string
 	Pattern        string
 	Options        syntax.RegexOptions
-	Tree           *syntax.RegexTree
-	Analysis       *analysisResults
+	CompileOptions []string
+	// MaintainCaptureOrder changes capture slot assignment, so it is part of the generated engine identity.
+	MaintainCaptureOrder bool
+	Tree                 *syntax.RegexTree
+	Analysis             *analysisResults
 
 	// parsing state
 	findEndsInAlwaysReturningTrue bool
@@ -170,17 +177,21 @@ func (rm *regexpData) addLocalDec(dec string) {
 	rm.additionalDeclarations = append(rm.additionalDeclarations, dec)
 }
 
-func (c *converter) addRegexp(sourceLocation, name string, txt string, opt syntax.RegexOptions) error {
+func (c *converter) addRegexp(sourceLocation, name string, txt string, opt syntax.RegexOptions, maintainCaptureOrder bool, compileOptions []string) error {
 	// check if already converted
 	for _, data := range c.data {
 		// match!  we're done here
-		if data.Pattern == txt && data.Options == opt {
+		if data.Pattern == txt && data.Options == opt && data.MaintainCaptureOrder == maintainCaptureOrder {
 			return nil
 		}
 	}
 
 	// parse pattern
-	tree, err := syntax.Parse(txt, opt|syntax.Compiled)
+	tree, err := syntax.Parse(txt, syntax.ParseOptions{
+		RegexOptions:         opt,
+		MaintainCaptureOrder: maintainCaptureOrder,
+		CodeGen:              true,
+	})
 	if err != nil {
 		return errors.Wrap(err, "error parsing regexp")
 	}
@@ -208,12 +219,14 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	c.writeLineFmt("/*\n%s*/", tree.Dump())
 
 	rm := &regexpData{
-		SourceLocation: sourceLocation,
-		GeneratedName:  newName,
-		Pattern:        txt,
-		Options:        opt,
-		Tree:           tree,
-		Analysis:       analyze(tree),
+		SourceLocation:       sourceLocation,
+		GeneratedName:        newName,
+		Pattern:              txt,
+		Options:              opt,
+		CompileOptions:       compileOptions,
+		MaintainCaptureOrder: maintainCaptureOrder,
+		Tree:                 tree,
+		Analysis:             analyze(tree),
 	}
 	c.data = append(c.data, rm)
 
@@ -255,7 +268,8 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 		// From ABC.go:120:10
 		// Pattern: [ABCD]+
 		// Options: regexp2.ECMAScript
-		type MyPattern0_Engine struct{}
+		func MyPattern0_FindFirstChar(r *regexp2.Runner) bool { ... }
+		func MyPattern0_Execute(r *regexp2.Runner) error { ... }
 
 	*/
 	caps, capsize := getCaps(rm.Tree)
@@ -265,7 +279,6 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 	c.writeLineFmt("// From %s", rm.SourceLocation)
 	c.writeLineFmt("// Pattern: %#v", rm.Pattern)
 	c.writeLineFmt("// Options: %v", getOptString(rm.Options))
-	c.writeLineFmt("type %s_Engine struct{}", rm.GeneratedName)
 	c.writeLine("")
 }
 
@@ -292,6 +305,8 @@ var runtimeCompileOptionNames = []string{
 
 var skippedCompileOptionNames = []string{
 	"OptionDisableCharClassASCIIBitmap",
+	"OptionDebug",
+	"OptionIsCodeGen",
 }
 
 func getOptString(opts syntax.RegexOptions) string {

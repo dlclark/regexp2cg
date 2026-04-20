@@ -10,7 +10,7 @@ import (
 )
 
 func (c *converter) emitFindFirstChar(rm *regexpData) {
-	c.writeLineFmt("func (%s_Engine) FindFirstChar(r *regexp2.Runner) bool {", rm.GeneratedName)
+	c.writeLineFmt("func %s_FindFirstChar(r *regexp2.Runner) bool {", rm.GeneratedName)
 	//c.writeLine(`fmt.Println("FindFirstChar")`)
 	defer func() {
 		c.writeLine("}\n")
