@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/dlclark/regexp2/syntax"
+	"github.com/dlclark/regexp2/v2/syntax"
 	"github.com/pkg/errors"
 )
 
@@ -53,14 +53,14 @@ func (c *converter) addHeader(packageName string) error {
 		package regexp2codegen
 
 		import (
-			"github.com/dlclark/regexp2"
+			"github.com/dlclark/regexp2/v2"
 		)
 	*/
 	c.writeLineFmt("package %s", packageName)
 	c.writeLine("import (")
-	c.writeLine("  \"github.com/dlclark/regexp2\"")
-	c.writeLine("  \"github.com/dlclark/regexp2/helpers\"")
-	c.writeLine("  \"github.com/dlclark/regexp2/syntax\"")
+	c.writeLine("  \"github.com/dlclark/regexp2/v2\"")
+	c.writeLine("  \"github.com/dlclark/regexp2/v2/helpers\"")
+	c.writeLine("  \"github.com/dlclark/regexp2/v2/syntax\"")
 	c.writeLine("  \"unicode\"")
 	//c.writeLine("  \"fmt\"")
 	c.writeLine(")")
@@ -71,7 +71,7 @@ func (c *converter) addHeader(packageName string) error {
 func (c *converter) addFooter() error {
 	/*
 			func init() {
-				regexp2.RegisterEngine("ABCD+", regexp2.ECMAScript, &MyPattern_Engine{})
+				regexp2.RegisterEngine("ABCD+", regexp2.ECMAScript, regexp2.RuntimeEngineData{...})
 		   }
 	*/
 
@@ -83,7 +83,21 @@ func (c *converter) addFooter() error {
 	// emit init func
 	c.writeLine("func init() {")
 	for _, rm := range c.data {
-		c.writeLineFmt("regexp2.RegisterEngine(%v, %v, &%s_Engine{})", getGoLiteral(rm.Pattern), getOptString(rm.Options), rm.GeneratedName)
+		c.writeLineFmt(`regexp2.RegisterEngine(%v, %v, regexp2.RuntimeEngineData{
+	Caps: %v,
+	CapNames: %v,
+	CapsList: %v,
+	CapSize: %v,
+	FindFirstChar: (%s_Engine{}).FindFirstChar,
+	Execute: (%[7]s_Engine{}).Execute,
+})`,
+			getGoLiteral(rm.Pattern),
+			getOptString(rm.Options),
+			getGoLiteral(rm.Tree.Caps),
+			getGoLiteral(rm.Tree.Capnames),
+			getGoLiteral(rm.Tree.Caplist),
+			rm.Tree.Captop,
+			rm.GeneratedName)
 	}
 	// emit basic usage of imports so we don't have to deal with import re-writing
 	c.writeLine("var _ = helpers.Min")
@@ -243,10 +257,6 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 		// Options: regexp2.ECMAScript
 		type MyPattern0_Engine struct{}
 
-		func (MyPattern0_Engine) Caps() map[int]int        { return map[int]int{} }
-		func (MyPattern0_Engine) CapNames() map[string]int { return map[string]int{} }
-		func (MyPattern0_Engine) CapsList() []string       { return []string{} }
-		func (MyPattern0_Engine) CapSize() int             { return 1 }
 	*/
 	caps, capsize := getCaps(rm.Tree)
 	rm.Tree.Caps = caps
@@ -256,10 +266,6 @@ func (c *converter) emitRegexStart(rm *regexpData) {
 	c.writeLineFmt("// Pattern: %#v", rm.Pattern)
 	c.writeLineFmt("// Options: %v", getOptString(rm.Options))
 	c.writeLineFmt("type %s_Engine struct{}", rm.GeneratedName)
-	c.writeLineFmt("func (%s_Engine) Caps() map[int]int { return %s }", rm.GeneratedName, getGoLiteral(caps))
-	c.writeLineFmt("func (%s_Engine) CapNames() map[string]int { return %s }", rm.GeneratedName, getGoLiteral(rm.Tree.Capnames))
-	c.writeLineFmt("func (%s_Engine) CapsList() []string { return %s }", rm.GeneratedName, getGoLiteral(rm.Tree.Caplist))
-	c.writeLineFmt("func (%s_Engine) CapSize() int { return %v }", rm.GeneratedName, capsize)
 	c.writeLine("")
 }
 
@@ -275,6 +281,17 @@ var optNames = []string{
 	"ECMAScript",
 	"RE2",
 	"Unicode",
+}
+
+var runtimeCompileOptionNames = []string{
+	"OptionMaxCachedRuneBufferLength",
+	"OptionMaxCachedReplaceBufferLength",
+	"OptionMaxCachedReplacerDataEntries",
+	"OptionMaxCachedReplacerDataBytes",
+}
+
+var skippedCompileOptionNames = []string{
+	"OptionDisableCharClassASCIIBitmap",
 }
 
 func getOptString(opts syntax.RegexOptions) string {

@@ -13,7 +13,7 @@ This will download `regexp2cg` from github, compile, and install it.
 **Since `regexp2cg` is currently experimental, to use the pre-compiled regex's your projects will need a specific `code_gen` branch of the `regexp2` library**:
 
 ```bash
-go get github.com/dlclark/regexp2@code_gen
+go get github.com/dlclark/regexp2/v2
 ```
 
 Eventually these changes will be merged into `regexp2` proper, but since there are a large number of changes I want to roll this in slowly.
@@ -56,4 +56,3 @@ This utility is new and likely has errors. If you think you found a bug please c
 
 # Future plans ...
 It might be nice to be able to exclude a pattern from the directory processing. Maybe add a command line option `--exclude "Pattern"` or you add support for an exclude comment above the `regexp2.MustCompile` line: `// regexpcg: exclude`.
-

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dlclark/regexp2/syntax"
+	"github.com/dlclark/regexp2/v2/syntax"
 )
 
 // Arbitrary limit for unrolling vs creating a loop.  We want to balance size in the generated
@@ -3069,6 +3069,10 @@ func (c *converter) emitStackPush(stackCookie int, args ...string) {
 		c.writeLineFmt("r.StackPush2(%s, %s)", args[0], args[1])
 	case 3:
 		c.writeLineFmt("r.StackPush3(%s, %s, %s)", args[0], args[1], args[2])
+	case 4:
+		c.writeLineFmt("r.StackPush4(%s, %s, %s, %s)", args[0], args[1], args[2], args[3])
+	case 5:
+		c.writeLineFmt("r.StackPush5(%s, %s, %s, %s, %s)", args[0], args[1], args[2], args[3], args[4])
 	default:
 		c.writeLineFmt("r.StackPushN(%s)", strings.Join(args, ", "))
 	}

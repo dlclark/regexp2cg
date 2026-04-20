@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dlclark/regexp2/syntax"
+	"github.com/dlclark/regexp2/v2/syntax"
 	"github.com/pkg/errors"
 )
 

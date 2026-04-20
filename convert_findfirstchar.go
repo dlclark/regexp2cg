@@ -6,7 +6,7 @@ import (
 	"math"
 	"unicode"
 
-	"github.com/dlclark/regexp2/syntax"
+	"github.com/dlclark/regexp2/v2/syntax"
 )
 
 func (c *converter) emitFindFirstChar(rm *regexpData) {
@@ -343,7 +343,7 @@ func (c *converter) emitIndexOfString_RightToLeft(rm *regexpData) {
 
 	c.writeLineFmt(`// The pattern begins with a literal %#[1]v. Find the next occurrence right-to-left.
 	// If it can't be found, there's no match.
-	pos = r.LastIndexOf(r.Runtext, pos, []rune(%#[1]v))
+	pos = helpers.LastIndexOf(r.Runtext[:pos], []rune(%#[1]v))
 	if pos >= 0 {
 		r.Runtextpos = pos + %[2]v
 		return true

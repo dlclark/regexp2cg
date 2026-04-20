@@ -13,10 +13,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/pkg/errors"
 
-	"github.com/dlclark/regexp2/syntax"
+	"github.com/dlclark/regexp2/v2/syntax"
 )
 
 // single regex options - if expr is set then use that, opt, and package
@@ -119,12 +120,15 @@ func convertPath(path string, includeTest bool) {
 			log.Printf("file %v imports regexp2", f)
 			ast.Inspect(file, func(n ast.Node) bool {
 				// Find asignment statements
-				// a := regexp2.MustCompile("pattern", 0)
+				// a := regexp2.MustCompile("pattern", regexp2.None)
 				// var a = regexp2....
 				if varDec, ok := n.(*ast.ValueSpec); ok {
 					// var dec
 					for i, val := range varDec.Values {
-						ok, pat, opt, pos := isStaticCompileCall(val, alias)
+						ok, pat, opt, pos, err := isStaticCompileCall(val, alias)
+						if err != nil {
+							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
+						}
 						if ok {
 							fset.Position(pos).String()
 							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
@@ -147,7 +151,10 @@ func convertPath(path string, includeTest bool) {
 					}
 				} else if assign, ok := n.(*ast.AssignStmt); ok {
 					for i, exp := range assign.Rhs {
-						ok, pat, opt, pos := isStaticCompileCall(exp, alias)
+						ok, pat, opt, pos, err := isStaticCompileCall(exp, alias)
+						if err != nil {
+							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
+						}
 						if ok {
 							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
 							// first find inits a converter
@@ -204,34 +211,45 @@ func getName(lhs ast.Node) string {
 	return ""
 }
 
-func isStaticCompileCall(n ast.Node, importAlias string) (ok bool, pattern string, opts int, patternPos token.Pos) {
+func isStaticCompileCall(n ast.Node, importAlias string) (ok bool, pattern string, opts int, patternPos token.Pos, err error) {
 	funcCall, ok := n.(*ast.CallExpr)
 	if !ok {
-		return false, "", 0, 0
+		return false, "", 0, 0, nil
 	}
 
-	if len(funcCall.Args) < 1 || len(funcCall.Args) > 2 {
-		return false, "", 0, 0
+	if len(funcCall.Args) < 1 {
+		return false, "", 0, 0, nil
 	}
 
 	if match, _ := isSelector(funcCall.Fun, importAlias, "MustCompile", "Compile"); match {
 		pattern, ok = extractPattern(funcCall.Args[0])
 		if !ok {
-			return false, "", 0, 0
+			return false, "", 0, 0, nil
 		}
 
 		opts = 0 // Default options
-		if len(funcCall.Args) == 2 {
-			tmpOpts, ok := getOpts(funcCall.Args[1], importAlias)
+		for _, arg := range funcCall.Args[1:] {
+			tmpOpts, ok := getOpts(arg, importAlias)
 			if ok {
-				opts = tmpOpts
+				opts |= tmpOpts
+				continue
 			}
+
+			knownCompileOption, err := isKnownNonRegexCompileOption(arg, importAlias)
+			if err != nil {
+				return false, "", 0, arg.Pos(), err
+			}
+			if knownCompileOption {
+				continue
+			}
+
+			return false, "", 0, 0, nil
 		}
 
-		return true, pattern, opts, funcCall.Args[0].Pos()
+		return true, pattern, opts, funcCall.Args[0].Pos(), nil
 	}
 
-	return false, "", 0, 0
+	return false, "", 0, 0, nil
 }
 
 func extractPattern(arg ast.Expr) (pattern string, ok bool) {
@@ -270,9 +288,15 @@ func getOpts(node ast.Node, importAlias string) (int, bool) {
 			return 0, false
 		}
 		return opts, true
+	} else if ok, _ := isSelector(node, importAlias, "None"); ok {
+		return 0, true
 	} else if ok, name := isSelector(node, importAlias, optNames...); ok {
 		//selector, convert to int
 		return convertOptsNameToInt(name)
+	} else if call, ok := node.(*ast.CallExpr); ok {
+		if ok, _ := isSelector(call.Fun, importAlias, "RegexOptions"); ok && len(call.Args) == 1 {
+			return getOpts(call.Args[0], importAlias)
+		}
 	} else if bin, ok := node.(*ast.BinaryExpr); ok {
 		// binary expression, gonna need to split and then do the operator
 		// converting to a constant
@@ -309,6 +333,26 @@ func getOpts(node ast.Node, importAlias string) (int, bool) {
 	return 0, false
 }
 
+func isKnownNonRegexCompileOption(node ast.Node, importAlias string) (bool, error) {
+	call, ok := node.(*ast.CallExpr)
+	if !ok {
+		return false, nil
+	}
+
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == importAlias {
+			if slices.Contains(runtimeCompileOptionNames, sel.Sel.Name) || slices.Contains(skippedCompileOptionNames, sel.Sel.Name) {
+				return true, nil
+			}
+			if strings.HasPrefix(sel.Sel.Name, "Option") {
+				return false, fmt.Errorf("unknown regexp2 compile option %s", sel.Sel.Name)
+			}
+		}
+	}
+
+	return false, nil
+}
+
 func convertOptsNameToInt(name string) (int, bool) {
 	idx := slices.Index(optNames, name)
 	if idx == -1 {
@@ -333,7 +377,7 @@ func isSelector(node ast.Node, pkg string, name ...string) (bool, string) {
 func importsRegexp2(file *ast.File, alias *string) bool {
 	*alias = ""
 	for _, i := range file.Imports {
-		if i.Path.Value == "\"github.com/dlclark/regexp2\"" {
+		if i.Path.Value == "\"github.com/dlclark/regexp2/v2\"" {
 			if i.Name != nil {
 				*alias = i.Name.Name
 			}

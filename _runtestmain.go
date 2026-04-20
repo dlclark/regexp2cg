@@ -6,14 +6,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/dlclark/regexp2"
+	"github.com/dlclark/regexp2/v2"
 )
 
 // our file that runs the given regex and options against the args
 // and outputs the results in a known way for comparison
 
 func main() {
-	re := regexp2.MustCompile(__PATTERN__, __OPTIONS__)
+	re := regexp2.MustCompile(__PATTERN__, regexp2.RegexOptions(__OPTIONS__))
 
 	if len(os.Args) > 2 {
 		//debug mode

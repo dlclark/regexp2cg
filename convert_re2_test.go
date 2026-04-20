@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/dlclark/regexp2/syntax"
+	"github.com/dlclark/regexp2/v2/syntax"
 )
 
 func runNoMatch(t *testing.T, pattern, reExec, input string) {

@@ -1,6 +1,6 @@
 package main
 
-import "github.com/dlclark/regexp2/syntax"
+import "github.com/dlclark/regexp2/v2/syntax"
 
 type analysisResults struct {
 	// true if the whole tree successfully processed, otherwise false
