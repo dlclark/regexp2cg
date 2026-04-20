@@ -11,32 +11,44 @@ func TestIsStaticCompileCall_V2CompileOptions(t *testing.T) {
 	tests := []struct {
 		name     string
 		expr     string
+		wantPat  string
 		wantOpts syntax.RegexOptions
 	}{
 		{
 			name:     "none",
 			expr:     `regexp2.MustCompile("abc", regexp2.None)`,
+			wantPat:  "abc",
 			wantOpts: 0,
 		},
 		{
 			name:     "variadic regex options",
 			expr:     `regexp2.MustCompile("abc", regexp2.IgnoreCase, regexp2.Multiline)`,
+			wantPat:  "abc",
 			wantOpts: syntax.IgnoreCase | syntax.Multiline,
 		},
 		{
 			name:     "explicit regex options conversion",
 			expr:     `regexp2.MustCompile("abc", regexp2.RegexOptions(0))`,
+			wantPat:  "abc",
 			wantOpts: 0,
 		},
 		{
 			name:     "mixed regex and skipped options",
 			expr:     `regexp2.MustCompile("abc", regexp2.IgnoreCase, regexp2.OptionDisableCharClassASCIIBitmap())`,
+			wantPat:  "abc",
 			wantOpts: syntax.IgnoreCase,
 		},
 		{
 			name:     "mixed regex and runtime optimization options",
 			expr:     `regexp2.MustCompile("abc", regexp2.IgnoreCase, regexp2.OptionMaxCachedRuneBufferLength(64*1024), regexp2.OptionMaxCachedReplaceBufferLength(64*1024), regexp2.OptionMaxCachedReplacerDataEntries(8), regexp2.OptionMaxCachedReplacerDataBytes(1024))`,
+			wantPat:  "abc",
 			wantOpts: syntax.IgnoreCase,
+		},
+		{
+			name:     "or expression mixed with runtime and trailing regex option",
+			expr:     `regexp2.MustCompile("testpattern", regexp2.IgnoreCase|regexp2.RE2, regexp2.OptionMaxCachedReplacerDataEntries(10), regexp2.Multiline)`,
+			wantPat:  "testpattern",
+			wantOpts: syntax.IgnoreCase | syntax.RE2 | syntax.Multiline,
 		},
 	}
 
@@ -54,8 +66,8 @@ func TestIsStaticCompileCall_V2CompileOptions(t *testing.T) {
 			if !ok {
 				t.Fatalf("isStaticCompileCall(%s) = false", tt.expr)
 			}
-			if pattern != "abc" {
-				t.Fatalf("pattern = %q, want abc", pattern)
+			if pattern != tt.wantPat {
+				t.Fatalf("pattern = %q, want %q", pattern, tt.wantPat)
 			}
 			if syntax.RegexOptions(opts) != tt.wantOpts {
 				t.Fatalf("opts = %v, want %v", syntax.RegexOptions(opts), tt.wantOpts)

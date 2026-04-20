@@ -1886,7 +1886,7 @@ func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 			if entriesPerIteration > 1 {
 				c.writeLineFmt("r.Runstackpos += %s * %v", iterationCount, entriesPerIteration)
 			} else {
-				c.writeLineFmt("r.Rtackpos += %s", iterationCount)
+				c.writeLineFmt("r.Runstackpos += %s", iterationCount)
 			}
 		} else {
 			// The child has backtracking constructs.  If we have no successful iterations previously processed, just bail.
