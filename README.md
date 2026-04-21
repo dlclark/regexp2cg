@@ -10,13 +10,11 @@ go install github.com/dlclark/regexp2cg
 
 This will download `regexp2cg` from github, compile, and install it. 
 
-**Since `regexp2cg` is currently experimental, to use the pre-compiled regex's your projects will need a specific `code_gen` branch of the `regexp2` library**:
+**`regexp2cg` is currently experimental and requires your project to use `regexp2/v2` library**:
 
 ```bash
 go get github.com/dlclark/regexp2/v2
 ```
-
-Eventually these changes will be merged into `regexp2` proper, but since there are a large number of changes I want to roll this in slowly.
 
 ## Run it...
 
@@ -44,7 +42,7 @@ For future runs you may want to add a [`//go:generate` comment](https://go.dev/b
 # Original code
 C# 11 added a compile-time regex generator: https://github.com/dotnet/runtime/tree/main/src/libraries/System.Text.RegularExpressions/gen
 
-This is a pure Go port of that generator (v9.0 preview) using the [regexp2](githug.com/dlclark/regexp2) engine as the base.
+This is a pure Go port of that generator (v9.0 preview) using the [regexp2](github.com/dlclark/regexp2) engine as the base.
 
 # Not supported patterns
 Per the C# implementation patterns that contain the following cannot be dynamically generated:
@@ -55,4 +53,4 @@ Per the C# implementation patterns that contain the following cannot be dynamica
 This utility is new and likely has errors. If you think you found a bug please confirm the pattern works as expected on https://regex101.com using the .NET Flavor. Please include a short Go Test that uses the pattern, options, match text, and expected results.
 
 # Future plans ...
-It might be nice to be able to exclude a pattern from the directory processing. Maybe add a command line option `--exclude "Pattern"` or you add support for an exclude comment above the `regexp2.MustCompile` line: `// regexpcg: exclude`.
+It might be nice to be able to exclude a pattern from the directory processing. Maybe add a command line option `--exclude "Pattern"` or add support for an exclude comment above the `regexp2.MustCompile` line: `// regexpcg: exclude`.

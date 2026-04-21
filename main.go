@@ -132,7 +132,6 @@ func convertPath(path string, includeTest bool) {
 							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
 						}
 						if ok {
-							fset.Position(pos).String()
 							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
 							// first find inits a converter
 							if c == nil {

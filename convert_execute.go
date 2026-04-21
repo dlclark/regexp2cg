@@ -885,7 +885,7 @@ func (c *converter) emitExecuteSingleCharLazy(rm *regexpData, node *syntax.Regex
 	c.writeLine("")
 	isInLoop := rm.Analysis.IsInLoop(node)
 
-	c.emitMarkLabel(rm, endLoopLabel, !(len(capturePos) > 0 || isInLoop))
+	c.emitMarkLabel(rm, endLoopLabel, len(capturePos) == 0 && !isInLoop)
 	if len(capturePos) != 0 {
 		c.writeLineFmt("%s = r.Crawlpos()", capturePos)
 	}
@@ -1278,7 +1278,6 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 		}
 	}
 
-	indexOfExpr = nil
 	*literalLength = 0
 	return false
 }
@@ -3257,7 +3256,7 @@ func describeCapture(rm *regexpData, capNum int) string {
 	// Otherwise, create a numerical description of the capture group.
 	tens := capNum % 10
 	// Ends in 1, 2, 3 but not 11, 12, or 13
-	if tens >= 1 && tens <= 3 && !(capNum == 11 || capNum == 12 || capNum == 13) {
+	if tens >= 1 && tens <= 3 && capNum != 11 && capNum != 12 && capNum != 13 {
 		switch tens {
 		case 1:
 			return fmt.Sprint(capNum, "st capture group")
@@ -3329,13 +3328,14 @@ func describeLoop(rm *regexpData, node *syntax.RegexNode) string {
 
 	var bounds string
 	if node.N == math.MaxInt32 {
-		if node.M == 0 {
+		switch node.M {
+		case 0:
 			bounds = " any number of times"
-		} else if node.M == 1 {
+		case 1:
 			bounds = " at least once"
-		} else if node.M == 2 {
+		case 2:
 			bounds = " at least twice"
-		} else {
+		default:
 			bounds = fmt.Sprintf(" at least %v times", node.M)
 		}
 	} else if node.M == 0 {

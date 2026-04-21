@@ -240,9 +240,10 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	if regexTree.FindOptimizations.LeadingAnchor == syntax.NtBol {
 		str1 := ">"
 		str2 := fmt.Sprint(" - ", regexTree.FindOptimizations.MinRequiredLength)
-		if regexTree.FindOptimizations.MinRequiredLength == 0 {
+		switch regexTree.FindOptimizations.MinRequiredLength {
+		case 0:
 			str2 = ""
-		} else if regexTree.FindOptimizations.MinRequiredLength == 1 {
+		case 1:
 			str1 = ">="
 			str2 = ""
 		}
@@ -268,13 +269,14 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 
 	// if we have a max len
 	if regexTree.FindOptimizations.MaxPossibleLength > -1 {
-		if regexTree.FindOptimizations.TrailingAnchor == syntax.NtEnd {
+		switch regexTree.FindOptimizations.TrailingAnchor {
+		case syntax.NtEnd:
 			c.writeLineFmt(`// The pattern has a trailing end (\z) anchor, and any possible match is no more than %v characters.
 			if pos < len(r.Runtext) - %[1]v {
 				pos = len(r.Runtext) - %[1]v
 			}
 			`, regexTree.FindOptimizations.MaxPossibleLength)
-		} else if regexTree.FindOptimizations.TrailingAnchor == syntax.NtEndZ {
+		case syntax.NtEndZ:
 			c.writeLineFmt(`// The pattern has a trailing end (\Z) anchor, and any possible match is no more than %v characters.
 			if pos < len(r.Runtext) - %[1]v {
 				pos = len(r.Runtext) - %[1]v

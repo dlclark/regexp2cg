@@ -33,7 +33,7 @@ func TestConversion(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer file.Close()
+	defer file.Close() // nolint:errcheck
 
 	// the high level structure of the file:
 	//		#comments - ignore only outside of the pattern
@@ -255,14 +255,14 @@ func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) 
 	mainContent, _ := os.ReadFile(origMainFile)
 	mainContent = bytes.Replace(mainContent, []byte("__PATTERN__"), []byte(fmt.Sprintf("%#v", pattern)), 1)
 	mainContent = bytes.Replace(mainContent, []byte("__OPTIONS__"), []byte(fmt.Sprintf("%#v", opts)), 1)
-	mainFile.Write(mainContent)
+	mainFile.Write(mainContent) // nolint:errcheck
 
 	// build!
 	cmd := exec.Command(goPath, "build", "-o", outFile.Name(), genPattern.Name(), mainFile.Name())
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Log(string(out))
 		t.Errorf("build error for pattern %v", pattern)
-		os.Remove(outFile.Name())
+		os.Remove(outFile.Name()) // nolint:errcheck
 		return ""
 	}
 

@@ -89,11 +89,11 @@ func tryAnalyze(node *syntax.RegexNode, results *analysisResults, isAtomicByAnce
 
 		// If the parent is atomic, so is the child.  That's the whole purpose
 		// of the Atomic node, and lookarounds are also implicitly atomic.
-		if !(node.T == syntax.NtAtomic || node.T == syntax.NtNegLook || node.T == syntax.NtPosLook ||
-			node.T == syntax.NtAlternate || node.T == syntax.NtBackRefCond || node.T == syntax.NtExprCond ||
-			node.T == syntax.NtCapture ||
-			(node.T == syntax.NtConcatenate && i == childCount-1) ||
-			((node.T == syntax.NtLoop || node.T == syntax.NtLazyloop) && node.N == 1)) {
+		if node.T != syntax.NtAtomic && node.T != syntax.NtNegLook && node.T != syntax.NtPosLook &&
+			node.T != syntax.NtAlternate && node.T != syntax.NtBackRefCond && node.T != syntax.NtExprCond &&
+			node.T != syntax.NtCapture &&
+			(node.T != syntax.NtConcatenate || i != childCount-1) &&
+			((node.T != syntax.NtLoop && node.T != syntax.NtLazyloop) || node.N != 1) {
 			// if these conditions aren't met then we're not atomic
 			treatChildAsAtomic = false
 		}
