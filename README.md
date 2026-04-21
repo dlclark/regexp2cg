@@ -13,7 +13,7 @@ This will download `regexp2cg` from github, compile, and install it.
 **`regexp2cg` is currently experimental and requires your project to use `regexp2/v2` library**:
 
 ```bash
-go get github.com/dlclark/regexp2/v2
+go get github.com/dlclark/regexp2/v2@latest
 ```
 
 ## Run it...
