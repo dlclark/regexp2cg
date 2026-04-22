@@ -130,11 +130,14 @@ func TestGeneratedRegisterEngineUsesV2Signature(t *testing.T) {
 	if !strings.Contains(got, `regexp2.RegisterEngine("abc", regexp2.RuntimeEngineData{`) {
 		t.Fatalf("generated RegisterEngine call does not use RuntimeEngineData as second argument:\n%s", got)
 	}
-	if !strings.Contains(got, `FindFirstChar: MyPattern_FindFirstChar,`) {
+	if !strings.Contains(got, `FindFirstChar:`) || !strings.Contains(got, `MyPattern_FindFirstChar,`) {
 		t.Fatalf("generated RegisterEngine call does not use generated FindFirstChar function:\n%s", got)
 	}
-	if !strings.Contains(got, `Execute:       MyPattern_Execute,`) {
+	if !strings.Contains(got, `Execute:`) || !strings.Contains(got, `MyPattern_Execute,`) {
 		t.Fatalf("generated RegisterEngine call does not use generated Execute function:\n%s", got)
+	}
+	if !strings.Contains(got, `StringPrefixFilter:`) || !strings.Contains(got, `MyPattern_StringPrefixFilter,`) {
+		t.Fatalf("generated RegisterEngine call does not use generated StringPrefixFilter function:\n%s", got)
 	}
 	if !strings.Contains(got, `}, regexp2.IgnoreCase, regexp2.OptionMaintainCaptureOrder())`) {
 		t.Fatalf("generated RegisterEngine call does not pass compile options after RuntimeEngineData:\n%s", got)

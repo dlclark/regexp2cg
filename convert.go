@@ -61,6 +61,7 @@ func (c *converter) addHeader(packageName string) error {
 	c.writeLine("  \"github.com/dlclark/regexp2/v2\"")
 	c.writeLine("  \"github.com/dlclark/regexp2/v2/helpers\"")
 	c.writeLine("  \"github.com/dlclark/regexp2/v2/syntax\"")
+	c.writeLine("  \"strings\"")
 	c.writeLine("  \"unicode\"")
 	//c.writeLine("  \"fmt\"")
 	c.writeLine(")")
@@ -87,13 +88,17 @@ func (c *converter) addFooter() error {
 		if len(rm.CompileOptions) > 0 {
 			compileOptions = ", " + strings.Join(rm.CompileOptions, ", ")
 		}
+		stringPrefixFilter := ""
+		if rm.StringPrefixFilterName != "" {
+			stringPrefixFilter = fmt.Sprintf("\n\tStringPrefixFilter: %s,", rm.StringPrefixFilterName)
+		}
 		c.writeLineFmt(`regexp2.RegisterEngine(%v, regexp2.RuntimeEngineData{
 	Caps: %v,
 	CapNames: %v,
 	CapsList: %v,
 	CapSize: %v,
 	FindFirstChar: %s_FindFirstChar,
-	Execute: %[6]s_Execute,
+	Execute: %[6]s_Execute,%[8]s
 }%[7]s)`,
 			getGoLiteral(rm.Pattern),
 			getGoLiteral(rm.Tree.Caps),
@@ -101,11 +106,13 @@ func (c *converter) addFooter() error {
 			getGoLiteral(rm.Tree.Caplist),
 			rm.Tree.Captop,
 			rm.GeneratedName,
-			compileOptions)
+			compileOptions,
+			stringPrefixFilter)
 	}
 	// emit basic usage of imports so we don't have to deal with import re-writing
 	c.writeLine("var _ = helpers.Min")
 	c.writeLine("var _ = syntax.NewCharSetRuntime")
+	c.writeLine("var _ = strings.Index")
 	c.writeLine("var _ = unicode.IsDigit")
 	c.writeLine("}")
 
@@ -114,20 +121,21 @@ func (c *converter) addFooter() error {
 	fmtOut, err := format.Source(origCode)
 
 	if err != nil {
-		c.out.Write(origCode)
+		_, _ = c.out.Write(origCode)
 		return err
 	}
-	c.out.Write(fmtOut)
+	_, _ = c.out.Write(fmtOut)
 
 	return c.err
 }
 
 type regexpData struct {
-	SourceLocation string
-	GeneratedName  string
-	Pattern        string
-	Options        syntax.RegexOptions
-	CompileOptions []string
+	SourceLocation         string
+	GeneratedName          string
+	Pattern                string
+	Options                syntax.RegexOptions
+	CompileOptions         []string
+	StringPrefixFilterName string
 	// MaintainCaptureOrder changes capture slot assignment, so it is part of the generated engine identity.
 	MaintainCaptureOrder bool
 	Tree                 *syntax.RegexTree
@@ -235,6 +243,7 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	// we need to emit 2 functions: FindFirstChar() and Execute()
 	// the C# version has a "scan" function above these that I've omitted here
 	c.emitFindFirstChar(rm)
+	c.emitStringPrefixFilter(rm)
 	c.emitExecute(rm)
 
 	// get our string for final manipulation
@@ -396,17 +405,6 @@ func getRuneLiteralParams(in []rune) string {
 	return buf.String()
 }
 
-// Determines whether its ok to embed the string in the field name.
-func isValidInFieldName(str string) bool {
-	for _, c := range str {
-		if unicode.IsLetter(c) || c == '_' || unicode.IsDigit(c) {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func getSHA256FieldName(toEncode string) string {
 	sha := sha256.New()
 	sha.Write([]byte(toEncode))
@@ -529,10 +527,6 @@ func (c *converter) emitSearchValues(chars []rune, fieldName string) string {
 	}
 
 	return fieldName
-}
-
-func (c *converter) emitGoto(label string) {
-	c.writeLineFmt("goto %s", label)
 }
 
 func (c *converter) emitLabel(label string) {

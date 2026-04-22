@@ -1,4 +1,6 @@
 github.com/dlclark/regexp2/v2 v2.0.0-beta.1 h1:aAzcgXSA/LoEAvemNvN9P25qczyN9jcUtqjb8+x7NEU=
 github.com/dlclark/regexp2/v2 v2.0.0-beta.1/go.mod h1:Bz5TMy5d8fPK0ximH0Yi9KvsRHNnvXqUx9XG6a4wB+I=
+github.com/dlclark/regexp2/v2 v2.0.0-beta.2 h1:uiEcWyFtpKois36nlFmJ/zs8wM/og/07pmLDGoiA6Bk=
+github.com/dlclark/regexp2/v2 v2.0.0-beta.2/go.mod h1:Bz5TMy5d8fPK0ximH0Yi9KvsRHNnvXqUx9XG6a4wB+I=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
