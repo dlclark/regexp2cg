@@ -120,65 +120,34 @@ func convertPath(path string, includeTest bool) {
 				alias = "regexp2"
 			}
 			log.Printf("file %v imports regexp2", f)
-			ast.Inspect(file, func(n ast.Node) bool {
-				// Find asignment statements
-				// a := regexp2.MustCompile("pattern", regexp2.None)
-				// var a = regexp2....
-				if varDec, ok := n.(*ast.ValueSpec); ok {
-					// var dec
-					for i, val := range varDec.Values {
-						ok, pat, opt, compileOptions, maintainCaptureOrder, pos, err := isStaticCompileCall(val, alias)
-						if err != nil {
-							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
-						}
-						if ok {
-							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
-							// first find inits a converter
-							if c == nil {
-								stream, outFile = getOutStream()
-								if stream == nil {
-									log.Fatalf("unable to open output")
-								}
-								c, err = newConverter(stream, p)
-								if err != nil {
-									log.Fatal(errors.Wrap(err, "code generation error"))
-								}
-							}
-
-							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(varDec.Names[i]), pat, syntax.RegexOptions(opt), maintainCaptureOrder, compileOptions); err != nil {
-								log.Fatal(errors.Wrap(err, "code generation error"))
-							}
-						}
+			addRegexp := func(pos token.Pos, name, pat string, opt int, maintainCaptureOrder bool, compileOptions []string) {
+				if name == "" {
+					name = "Regexp"
+				}
+				log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
+				// first find inits a converter
+				if c == nil {
+					stream, outFile = getOutStream()
+					if stream == nil {
+						log.Fatalf("unable to open output")
 					}
-				} else if assign, ok := n.(*ast.AssignStmt); ok {
-					for i, exp := range assign.Rhs {
-						ok, pat, opt, compileOptions, maintainCaptureOrder, pos, err := isStaticCompileCall(exp, alias)
-						if err != nil {
-							log.Fatal(errors.Wrapf(err, "%s: unsupported regexp2 compile option", fset.Position(pos)))
-						}
-						if ok {
-							log.Printf("%s: adding pattern %#v options %v", fset.Position(pos), pat, opt)
-							// first find inits a converter
-							if c == nil {
-								stream, outFile = getOutStream()
-								if stream == nil {
-									log.Fatalf("unable to open output")
-								}
-								c, err = newConverter(stream, p)
-								if err != nil {
-									log.Fatal(errors.Wrap(err, "code generation error"))
-								}
-							}
-
-							if err := c.addRegexp(getLocation(fset, pos, outFile), getName(assign.Lhs[i]), pat, syntax.RegexOptions(opt), maintainCaptureOrder, compileOptions); err != nil {
-								log.Fatal(errors.Wrap(err, "code generation error"))
-							}
-						}
+					c, err = newConverter(stream, p)
+					if err != nil {
+						log.Fatal(errors.Wrap(err, "code generation error"))
 					}
 				}
 
-				return true
-			})
+				if err := c.addRegexp(getLocation(fset, pos, outFile), name, pat, syntax.RegexOptions(opt), maintainCaptureOrder, compileOptions); err != nil {
+					log.Fatal(errors.Wrap(err, "code generation error"))
+				}
+			}
+			matches, compileErr := discoverStaticCompileCalls(file, alias)
+			if compileErr != nil {
+				log.Fatal(errors.Wrapf(compileErr, "%s: unsupported regexp2 compile option", fset.Position(compileErr.Pos)))
+			}
+			for _, match := range matches {
+				addRegexp(match.PatternPos, match.Name, match.Pattern, match.Opts, match.MaintainCaptureOrder, match.CompileOptions)
+			}
 		}
 	}
 	if c != nil {
@@ -186,6 +155,137 @@ func convertPath(path string, includeTest bool) {
 			log.Fatal(errors.Wrap(err, "code generation error"))
 		}
 	}
+}
+
+type namedStaticCompileCall struct {
+	staticCompileCall
+	Name string
+}
+
+type staticCompileCall struct {
+	Pattern              string
+	Opts                 int
+	CompileOptions       []string
+	MaintainCaptureOrder bool
+	PatternPos           token.Pos
+}
+
+type staticCompileCallError struct {
+	Pos token.Pos
+	Err error
+}
+
+func (e *staticCompileCallError) Error() string {
+	return e.Err.Error()
+}
+
+func discoverStaticCompileCalls(file *ast.File, importAlias string) ([]namedStaticCompileCall, *staticCompileCallError) {
+	var matches []namedStaticCompileCall
+	var compileErr *staticCompileCallError
+
+	addMatches := func(name string, node ast.Node) {
+		found, err := collectStaticCompileCalls(node, importAlias)
+		if err != nil {
+			compileErr = err
+			return
+		}
+		for _, match := range found {
+			matches = append(matches, namedStaticCompileCall{
+				staticCompileCall: match,
+				Name:              name,
+			})
+		}
+	}
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil || compileErr != nil {
+			return false
+		}
+
+		// Prefer declaration and assignment names for generated function names.
+		// Any static compile calls outside these shapes are still discovered by
+		// the CallExpr fallback below.
+		if varDec, ok := n.(*ast.ValueSpec); ok {
+			for i, val := range varDec.Values {
+				name := ""
+				if i < len(varDec.Names) {
+					name = getName(varDec.Names[i])
+				}
+				addMatches(name, val)
+				if compileErr != nil {
+					return false
+				}
+			}
+			return false
+		}
+		if assign, ok := n.(*ast.AssignStmt); ok {
+			for i, exp := range assign.Rhs {
+				name := ""
+				if i < len(assign.Lhs) {
+					name = getName(assign.Lhs[i])
+				}
+				addMatches(name, exp)
+				if compileErr != nil {
+					return false
+				}
+			}
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			ok, pat, opt, compileOptions, maintainCaptureOrder, pos, err := isStaticCompileCall(call, importAlias)
+			if err != nil {
+				compileErr = &staticCompileCallError{Pos: pos, Err: err}
+				return false
+			}
+			if ok {
+				matches = append(matches, namedStaticCompileCall{
+					staticCompileCall: staticCompileCall{
+						Pattern:              pat,
+						Opts:                 opt,
+						CompileOptions:       compileOptions,
+						MaintainCaptureOrder: maintainCaptureOrder,
+						PatternPos:           pos,
+					},
+				})
+				return false
+			}
+		}
+
+		return true
+	})
+
+	return matches, compileErr
+}
+
+func collectStaticCompileCalls(n ast.Node, importAlias string) ([]staticCompileCall, *staticCompileCallError) {
+	var matches []staticCompileCall
+	var compileErr *staticCompileCallError
+
+	ast.Inspect(n, func(node ast.Node) bool {
+		if node == nil || compileErr != nil {
+			return false
+		}
+
+		ok, pat, opt, compileOptions, maintainCaptureOrder, pos, err := isStaticCompileCall(node, importAlias)
+		if err != nil {
+			compileErr = &staticCompileCallError{Pos: pos, Err: err}
+			return false
+		}
+		if ok {
+			matches = append(matches, staticCompileCall{
+				Pattern:              pat,
+				Opts:                 opt,
+				CompileOptions:       compileOptions,
+				MaintainCaptureOrder: maintainCaptureOrder,
+				PatternPos:           pos,
+			})
+			return false
+		}
+
+		return true
+	})
+
+	return matches, compileErr
 }
 
 // returns a location in the fileset relative to the output path given
