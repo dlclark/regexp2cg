@@ -28,16 +28,13 @@ func (c *converter) emitStringPrefixFilterForPrefix(rm *regexpData, prefix strin
 	if prefix == "" || (ignoreCase && !isASCIIString(prefix)) {
 		return
 	}
-	if ignoreCase {
-		c.ensureStringPrefixFilterASCIIIgnoreCaseHelper()
-	}
 
 	name := fmt.Sprintf("%s_StringPrefixFilter", rm.GeneratedName)
 	rm.StringPrefixFilterName = name
 
 	indexExpr := fmt.Sprintf("strings.Index(input[startAt:], %#[1]v)", prefix)
 	if ignoreCase {
-		indexExpr = fmt.Sprintf("regexp2cgIndexASCIIIgnoreCase(input[startAt:], %#[1]v)", prefix)
+		indexExpr = fmt.Sprintf("helpers.IndexStringIgnoreCaseASCII(input[startAt:], %#[1]v)", prefix)
 	}
 
 	c.writeLineFmt(`func %[1]s(input string, startAt int) (int, bool) {
@@ -66,7 +63,6 @@ func (c *converter) emitStringPrefixFilterForPrefixes(rm *regexpData, prefixes [
 				return
 			}
 		}
-		c.ensureStringPrefixFilterASCIIIgnoreCaseHelper()
 	}
 
 	prefixesName := fmt.Sprintf("stringPrefixFilterPrefixes_%s", getSHA256FieldName(fmt.Sprint(prefixes, ignoreCase)))
@@ -91,7 +87,7 @@ func (c *converter) emitStringPrefixFilterForPrefixes(rm *regexpData, prefixes [
 		var offset int
 `, name, rm.Tree.FindOptimizations.MinRequiredLength, prefixesName)
 	if ignoreCase {
-		c.writeLine(`		offset = regexp2cgIndexASCIIIgnoreCase(remaining, prefix)`)
+		c.writeLine(`		offset = helpers.IndexStringIgnoreCaseASCII(remaining, prefix)`)
 	} else {
 		c.writeLine(`		offset = strings.Index(remaining, prefix)`)
 	}
@@ -105,42 +101,6 @@ func (c *converter) emitStringPrefixFilterForPrefixes(rm *regexpData, prefixes [
 	return startAt + best, true
 }
 `)
-}
-
-func (c *converter) ensureStringPrefixFilterASCIIIgnoreCaseHelper() {
-	const name = "regexp2cgIndexASCIIIgnoreCase"
-	if _, ok := c.requiredHelpers[name]; ok {
-		return
-	}
-
-	c.requiredHelpers[name] = `func regexp2cgIndexASCIIIgnoreCase(s, prefix string) int {
-	if len(prefix) == 0 {
-		return 0
-	}
-	end := len(s) - len(prefix)
-	for i := 0; i <= end; i++ {
-		if regexp2cgEqualASCIIIgnoreCase(s[i:i+len(prefix)], prefix) {
-			return i
-		}
-	}
-	return -1
-}
-
-func regexp2cgEqualASCIIIgnoreCase(s, prefix string) bool {
-	for i := 0; i < len(prefix); i++ {
-		if regexp2cgFoldASCII(s[i]) != regexp2cgFoldASCII(prefix[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func regexp2cgFoldASCII(c byte) byte {
-	if 'A' <= c && c <= 'Z' {
-		return c + ('a' - 'A')
-	}
-	return c
-}`
 }
 
 func isASCIIString(s string) bool {

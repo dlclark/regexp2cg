@@ -1050,58 +1050,27 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		// all ascii is included
 		return c.emitAllAsciiContained(negate, chExpr, set)
 	}
-	/*
-	   // We determined that the character class may contain ASCII, so we
-	   // output the lookup against the lookup table.
+	// We determined that the character class may contain ASCII, so use the bitmap for
+	// ASCII input and only fall back to CharIn for non-ASCII input when needed.
+	bitmapExpr := fmt.Sprintf("helpers.IsInASCIIBitmap(%s, 0x%x, 0x%x)", chExpr, bitVector[0], bitVector[1])
+	if analysis.ContainsOnlyAscii {
+		if negate {
+			return fmt.Sprintf("(%s >= 128 || !%s)", chExpr, bitmapExpr)
+		}
+		return fmt.Sprintf("(%s < 128 && %s)", chExpr, bitmapExpr)
+	}
+	if analysis.AllNonAsciiContained {
+		if negate {
+			return fmt.Sprintf("(%s < 128 && !%s)", chExpr, bitmapExpr)
+		}
+		return fmt.Sprintf("(%s >= 128 || %s)", chExpr, bitmapExpr)
+	}
 
-	   if (analysis.ContainsOnlyAscii)
-	   {
-	       // If all inputs that could match are ASCII, we only need the lookup table, guarded
-	       // by a check for the upper bound (which serves both to limit for what characters
-	       // we need to access the lookup table and to bounds check the lookup table access).
-	       return negate ?
-	           $"((ch = {chExpr}) >= {Literal((char)analysis.UpperBoundExclusiveIfOnlyRanges)} || ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) == 0)" :
-	           $"((ch = {chExpr}) < {Literal((char)analysis.UpperBoundExclusiveIfOnlyRanges)} && ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) != 0)";
-	   }
-
-	   if (analysis.AllNonAsciiContained)
-	   {
-	       // If every non-ASCII value is considered a match, we can immediately succeed for any
-	       // non-ASCII inputs, and access the lookup table for the rest.
-	       return negate ?
-	           $"((ch = {chExpr}) < 128 && ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) == 0)" :
-	           $"((ch = {chExpr}) >= 128 || ({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) != 0)";
-	   }
-
-	   // We know that the whole class wasn't ASCII, and we don't know anything about the non-ASCII
-	   // characters other than that some might be included, for example if the character class
-	   // were [\w\d], so if ch >= 128, we need to fall back to calling CharInClass. For ASCII, we
-	   // can use a lookup table, but if it's a known set of ASCII characters we can also use a helper.
-	   string asciiExpr = bitVectorString switch
-	   {
-	       "\0\0\0\u03ff\ufffe\u07ff\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetterOrDigit(ch)",
-
-	       "\0\0\0\u03FF\0\0\0\0" => $"{(negate ? "!" : "")}char.IsAsciiDigit(ch)",
-
-	       "\0\0\0\0\ufffe\u07FF\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetter(ch)",
-	       "\0\0\0\0\0\0\ufffe\u07ff" => $"{(negate ? "!" : "")}char.IsAsciiLetterLower(ch)",
-	       "\0\0\0\0\ufffe\u07FF\0\0" => $"{(negate ? "!" : "")}char.IsAsciiLetterUpper(ch)",
-
-	       "\0\0\0\u03FF\u007E\0\u007E\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigit(ch)",
-	       "\0\0\0\u03FF\0\0\u007E\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigitLower(ch)",
-	       "\0\0\0\u03FF\u007E\0\0\0" => $"{(negate ? "!" : "")}char.IsAsciiHexDigitUpper(ch)",
-
-	       _ => $"({Literal(bitVectorString)}[ch >> 4] & (1 << (ch & 0xF))) {(negate ? "=" : "!")}= 0",
-	   };
-	   return $"((ch = {chExpr}) < 128 ? {asciiExpr} : {(negate ? "!" : "")}RegexRunner.CharInClass((char)ch, {Literal(charClass)}))";
-	*/
-
-	// very base option, not optimized
 	setField := c.emitSetDefinition(set)
 	if negate {
-		return fmt.Sprintf("!%s.CharIn(%s)", setField, chExpr)
+		return fmt.Sprintf("((%s >= 128 || !%s) && (%[1]s < 128 || !%[3]s.CharIn(%[1]s)))", chExpr, bitmapExpr, setField)
 	}
-	return fmt.Sprintf("%s.CharIn(%s)", setField, chExpr)
+	return fmt.Sprintf("((%s < 128 && %s) || (%[1]s >= 128 && %[3]s.CharIn(%[1]s)))", chExpr, bitmapExpr, setField)
 }
 
 func getRangeCheckClause(chExpr string, r syntax.SingleRange, negate bool) string {
