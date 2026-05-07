@@ -858,7 +858,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		sb.WriteString(chExpr)
 		for _, cat := range cats {
 			sb.WriteString(", unicode.")
-			sb.WriteString(cat.Cat)
+			sb.WriteString(getUnicodeRangeTableName(cat.Cat))
 		}
 		sb.WriteString(")")
 		return sb.String()
@@ -1110,4 +1110,11 @@ func (c *converter) emitAllAsciiContained(negate bool, chExpr string, set *synta
 		return fmt.Sprintf("%s >= 128 && !%s.CharIn(%[1]s)", chExpr, setField)
 	}
 	return fmt.Sprintf("%s < 128 || %s.CharIn(%[1]s)", chExpr, setField)
+}
+
+func getUnicodeRangeTableName(cat string) string {
+	if alias, ok := unicode.CategoryAliases[cat]; ok {
+		return alias
+	}
+	return cat
 }
