@@ -133,6 +133,15 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	// Anchors that fully implement TryFindNextPossibleStartingPosition, with a check that leads to immediate success or failure determination.
 	switch regexTree.FindOptimizations.FindMode {
 	case syntax.LeadingAnchor_LeftToRight_Beginning:
+		if hasBeginningAndTrailingEndExactLength(regexTree) {
+			minRequiredLength := regexTree.FindOptimizations.MinRequiredLength
+			c.writeLineFmt(`// The pattern leads with a beginning (\A) anchor and has a trailing end (\z) anchor, and any possible match is exactly %v characters.
+		if pos == 0 && len(r.Runtext) == %[1]v {
+			return true
+		}`, minRequiredLength)
+			return true
+		}
+
 		c.writeLine("// The pattern leads with a beginning (\\A) anchor.")
 		// If we're at the beginning, we're at a possible match location.  Otherwise,
 		// we'll never be, so fail immediately.
@@ -287,6 +296,141 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 	}
 
 	return false
+}
+
+func hasBeginningAndTrailingEndExactLength(regexTree *syntax.RegexTree) bool {
+	if findTrailingAnchor(regexTree.Root) != syntax.NtEnd {
+		return false
+	}
+	maxLength := computeMaxLength(regexTree.Root)
+	return maxLength >= 0 && maxLength == regexTree.FindOptimizations.MinRequiredLength
+}
+
+func findTrailingAnchor(node *syntax.RegexNode) syntax.NodeType {
+	for {
+		switch node.T {
+		case syntax.NtCapture, syntax.NtAtomic:
+			if len(node.Children) == 0 {
+				return syntax.NtUnknown
+			}
+			node = node.Children[0]
+			continue
+		case syntax.NtConcatenate:
+			for i := len(node.Children) - 1; i >= 0; i-- {
+				anchor := findTrailingAnchor(node.Children[i])
+				if anchor != syntax.NtUnknown {
+					return anchor
+				}
+				if computeMaxLength(node.Children[i]) != 0 {
+					return syntax.NtUnknown
+				}
+			}
+			return syntax.NtUnknown
+		case syntax.NtBeginning, syntax.NtBol, syntax.NtBoundary, syntax.NtECMABoundary,
+			syntax.NtEnd, syntax.NtEndZ, syntax.NtEol, syntax.NtNonboundary,
+			syntax.NtNonECMABoundary, syntax.NtStart, syntax.NtNegLook, syntax.NtPosLook:
+			return node.T
+		default:
+			return syntax.NtUnknown
+		}
+	}
+}
+
+func computeMaxLength(node *syntax.RegexNode) int {
+	switch node.T {
+	case syntax.NtOne, syntax.NtNotone, syntax.NtSet:
+		return 1
+	case syntax.NtMulti:
+		return len(node.Str)
+	case syntax.NtNotonelazy, syntax.NtNotoneloop, syntax.NtNotoneloopatomic,
+		syntax.NtOnelazy, syntax.NtOneloop, syntax.NtOneloopatomic,
+		syntax.NtSetlazy, syntax.NtSetloop, syntax.NtSetloopatomic:
+		if node.N == math.MaxInt32 {
+			return -1
+		}
+		return node.N
+	case syntax.NtLazyloop, syntax.NtLoop:
+		if node.N == math.MaxInt32 {
+			return -1
+		}
+		childLength := computeMaxLength(node.Children[0])
+		if childLength < 0 {
+			return -1
+		}
+		return multiplyMaxLength(node.N, childLength)
+	case syntax.NtAlternate:
+		maxLength := -1
+		for _, child := range node.Children {
+			childLength := computeMaxLength(child)
+			if childLength < 0 {
+				return -1
+			}
+			if childLength > maxLength {
+				maxLength = childLength
+			}
+		}
+		return maxLength
+	case syntax.NtBackRefCond:
+		if len(node.Children) < 2 {
+			return 0
+		}
+		return maxKnownLength(computeMaxLength(node.Children[0]), computeMaxLength(node.Children[1]))
+	case syntax.NtExprCond:
+		if len(node.Children) < 3 {
+			return 0
+		}
+		return maxKnownLength(computeMaxLength(node.Children[1]), computeMaxLength(node.Children[2]))
+	case syntax.NtConcatenate:
+		sum := 0
+		for _, child := range node.Children {
+			childLength := computeMaxLength(child)
+			if childLength < 0 {
+				return -1
+			}
+			sum = addMaxLength(sum, childLength)
+			if sum < 0 {
+				return -1
+			}
+		}
+		return sum
+	case syntax.NtAtomic, syntax.NtCapture:
+		return computeMaxLength(node.Children[0])
+	case syntax.NtEmpty, syntax.NtNothing, syntax.NtUpdateBumpalong,
+		syntax.NtBeginning, syntax.NtBol, syntax.NtBoundary, syntax.NtECMABoundary,
+		syntax.NtEnd, syntax.NtEndZ, syntax.NtEol, syntax.NtNonboundary,
+		syntax.NtNonECMABoundary, syntax.NtStart, syntax.NtNegLook, syntax.NtPosLook:
+		return 0
+	case syntax.NtRef:
+		return -1
+	}
+	return -1
+}
+
+func maxKnownLength(a, b int) int {
+	if a < 0 || b < 0 {
+		return -1
+	}
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func multiplyMaxLength(a, b int) int {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > math.MaxInt32/b {
+		return -1
+	}
+	return a * b
+}
+
+func addMaxLength(a, b int) int {
+	if a > math.MaxInt32-b {
+		return -1
+	}
+	return a + b
 }
 
 // Emits a case-sensitive left-to-right search for a substring.

@@ -145,6 +145,26 @@ func TestGeneratedRegisterEngineUsesV2Signature(t *testing.T) {
 	}
 }
 
+func TestGeneratedBeginningEndAnchoredExactLengthCheck(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", `\Aabc\z`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, `pos == 0 && len(r.Runtext) == 3`) {
+		t.Fatalf("generated FindFirstChar does not include exact-length anchored fast path:\n%s", got)
+	}
+}
+
 func TestCollectStaticCompileCalls_CompositeLiterals(t *testing.T) {
 	tests := []struct {
 		name       string
