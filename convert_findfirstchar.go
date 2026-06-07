@@ -97,6 +97,8 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 			c.emitFixedSet_RightToLeft(rm)
 		case syntax.LiteralAfterLoop_LeftToRight:
 			c.emitLiteralAfterAtomicLoop(rm)
+		case syntax.RequiredLandmarkChain_LeftToRight:
+			c.emitRequiredLandmarkChain_LeftToRight(rm)
 		default:
 			//there's a special case here where we haven't written anything
 			// and we don't want to declare the "pos" var
@@ -835,6 +837,191 @@ func (c *converter) emitLiteralAfterAtomicLoop(rm *regexpData) {
 
 	c.writeLine(endBlock2)
 	c.writeLine(endBlock)
+}
+
+// Emits a left-to-right search for a chain of required landmarks following a leading set loop.
+func (c *converter) emitRequiredLandmarkChain_LeftToRight(rm *regexpData) {
+	chain := rm.Tree.FindOptimizations.LandmarkChain
+	if chain == nil || chain.LeadingLoopSet == nil || len(chain.Landmarks) == 0 {
+		c.writeLine("return true")
+		rm.findEndsInAlwaysReturningTrue = true
+		return
+	}
+
+	leadingLoopSet := c.emitSetDefinition(chain.LeadingLoopSet)
+
+	c.writeLineFmt(`// The pattern begins with a leading loop followed by required landmarks.
+	// Leading loop set: %s.
+	// Find each landmark in order, then walk backwards to the earliest viable loop start.
+	var landmarkStart, landmarkCoreStart, landmarkEnd int
+	var firstStart, firstCoreStart, nextStart int
+	for searchStart := pos; searchStart <= len(r.Runtext)-%d; {
+%s
+		firstStart = landmarkStart
+		firstCoreStart = landmarkCoreStart
+		nextStart = landmarkEnd
+%s
+
+		candidate := firstStart
+		if candidate < pos {
+			candidate = pos
+		}
+		for candidate > pos && %s.CharIn(r.Runtext[candidate-1]) {
+			candidate--
+		}
+		if candidate <= len(r.Runtext)-%d {
+			r.Runtextpos = candidate
+			return true
+		}
+
+		searchStart = firstCoreStart + 1
+	}`, chain.LeadingLoopSet.String(), rm.Tree.FindOptimizations.MinRequiredLength, c.emitRequiredLandmarkSearchOptimized(chain.Landmarks[0], 0, len(chain.Landmarks), "searchStart", "NoMatchFound", "\t\t"), c.emitSubsequentRequiredLandmarkSearches(chain.Landmarks), leadingLoopSet, rm.Tree.FindOptimizations.MinRequiredLength)
+	rm.noMatchFoundLabelNeeded = true
+}
+
+func (c *converter) emitSubsequentRequiredLandmarkSearches(landmarks []syntax.RequiredLandmark) string {
+	buf := &bytes.Buffer{}
+	for i := 1; i < len(landmarks); i++ {
+		buf.WriteString(c.emitRequiredLandmarkSearchOptimized(landmarks[i], i, len(landmarks), "nextStart", "NoMatchFound", "\t\t"))
+		if i+1 < len(landmarks) {
+			buf.WriteString("\t\tnextStart = landmarkEnd\n")
+		}
+	}
+	return buf.String()
+}
+
+func (c *converter) emitRequiredLandmarkSearchOptimized(landmark syntax.RequiredLandmark, landmarkIndex, landmarkCount int, searchStart, notFoundLabel, indent string) string {
+	buf := &bytes.Buffer{}
+	successLabel := "CheckLeadingSet"
+	if landmarkIndex+1 < landmarkCount {
+		successLabel = fmt.Sprintf("Landmark%d", landmarkIndex+1)
+	}
+	fmt.Fprintf(buf, `%s// Landmark %d: scan forward until any alternative matches.
+%sfor i := %s; i < len(r.Runtext); i++ {
+`, indent, landmarkIndex, indent, searchStart)
+	for altIndex, alt := range landmark.Alternatives {
+		buf.WriteString(c.emitRequiredLandmarkAlternativeSearchOptimized(alt, landmarkIndex, altIndex, len(landmark.Alternatives), successLabel, indent+"\t"))
+	}
+	fmt.Fprintf(buf, `%s}
+%s	goto %s
+%s:
+`, indent, indent, notFoundLabel, successLabel)
+	return buf.String()
+}
+
+func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.RequiredLandmarkAlternative, landmarkIndex, altIndex, altCount int, successLabel, indent string) string {
+	buf := &bytes.Buffer{}
+	if altIndex > 0 {
+		fmt.Fprintf(buf, `%sLandmark%dAlt%d:
+`, indent, landmarkIndex, altIndex)
+	}
+	failureJump := "continue"
+	if altIndex+1 < altCount {
+		failureJump = fmt.Sprintf("goto Landmark%dAlt%d", landmarkIndex, altIndex+1)
+	}
+	fmt.Fprintf(buf, `%s// Landmark %d, alternative %d: %s.
+%s{
+`, indent, landmarkIndex, altIndex, c.requiredLandmarkAlternativeDescription(alt), indent)
+
+	if alt.RequireWhitespaceBefore {
+		whitespaceSet := c.emitSetDefinition(alt.LeadingWhitespaceSet)
+		fmt.Fprintf(buf, `%s	if i == 0 || !%s.CharIn(r.Runtext[i-1]) {
+%s		%s
+%s	}
+`, indent, whitespaceSet, indent, failureJump, indent)
+	}
+
+	if len(alt.Literal) > 0 {
+		literal := getRuneSliceLiteral(alt.Literal)
+		firstRune := fmt.Sprintf("%q", alt.Literal[0])
+		if len(alt.Literal) == 1 {
+			fmt.Fprintf(buf, `%s	if i >= len(r.Runtext) || r.Runtext[i] != %s {
+%s		%s
+%s	}
+%s	end := i + 1
+`, indent, firstRune, indent, failureJump, indent, indent)
+		} else {
+			fmt.Fprintf(buf, `%s	if i+%d > len(r.Runtext) || r.Runtext[i] != %s || !helpers.StartsWith(r.Runtext[i:], %s) {
+%s		%s
+%s	}
+%s	end := i + %d
+`, indent, len(alt.Literal), firstRune, literal, indent, failureJump, indent, indent, len(alt.Literal))
+		}
+	} else {
+		set := c.emitSetDefinition(alt.Set)
+		maxRepeat := alt.MaxRepeat
+		if maxRepeat <= 0 {
+			maxRepeat = alt.MinRepeat
+		}
+		fmt.Fprintf(buf, `%s	end := i
+%s	for end < len(r.Runtext) && end-i < %d && %s.CharIn(r.Runtext[end]) {
+%s		end++
+%s	}
+%s	if end-i < %d {
+%s		%s
+%s	}
+`, indent, indent, maxRepeat, set, indent, indent, indent, alt.MinRepeat, indent, failureJump, indent)
+	}
+
+	if alt.RequireWhitespaceAfter {
+		whitespaceSet := c.emitSetDefinition(alt.TrailingWhitespaceSet)
+		fmt.Fprintf(buf, `%s	if end >= len(r.Runtext) || !%s.CharIn(r.Runtext[end]) {
+%s		%s
+%s	}
+`, indent, whitespaceSet, indent, failureJump, indent)
+	}
+
+	if alt.LeadingWhitespaceSet == nil {
+		fmt.Fprintf(buf, `%s	landmarkStart = i
+%s	landmarkCoreStart = i
+%s	landmarkEnd = end
+%s	goto %s
+%s}
+`, indent, indent, indent, indent, successLabel, indent)
+	} else {
+		fmt.Fprintf(buf, `%s	matchStart := i
+%s	for matchStart > 0 && %s.CharIn(r.Runtext[matchStart-1]) {
+%s		matchStart--
+%s	}
+%s	landmarkStart = matchStart
+%s	landmarkCoreStart = i
+%s	landmarkEnd = end
+%s	goto %s
+%s}
+`, indent, indent, c.emitSetDefinition(alt.LeadingWhitespaceSet), indent, indent, indent, indent, indent, indent, successLabel, indent)
+	}
+	return buf.String()
+}
+
+func (c *converter) requiredLandmarkAlternativeDescription(alt syntax.RequiredLandmarkAlternative) string {
+	core := "unknown"
+	if len(alt.Literal) > 0 {
+		core = fmt.Sprintf("literal %q", string(alt.Literal))
+	} else if alt.Set != nil {
+		if alt.MinRepeat == alt.MaxRepeat || alt.MaxRepeat <= 0 {
+			core = fmt.Sprintf("set %s repeated %d time(s)", alt.Set.String(), alt.MinRepeat)
+		} else {
+			core = fmt.Sprintf("set %s repeated %d..%d time(s)", alt.Set.String(), alt.MinRepeat, alt.MaxRepeat)
+		}
+	}
+	if alt.RequireWhitespaceBefore {
+		core += fmt.Sprintf(", requires leading whitespace %s", requiredLandmarkSetDescription(alt.LeadingWhitespaceSet))
+	} else if alt.LeadingWhitespaceSet != nil {
+		core += fmt.Sprintf(", allows leading whitespace %s", requiredLandmarkSetDescription(alt.LeadingWhitespaceSet))
+	}
+	if alt.RequireWhitespaceAfter {
+		core += fmt.Sprintf(", requires trailing whitespace %s", requiredLandmarkSetDescription(alt.TrailingWhitespaceSet))
+	} else if alt.TrailingWhitespaceSet != nil {
+		core += fmt.Sprintf(", allows trailing whitespace %s", requiredLandmarkSetDescription(alt.TrailingWhitespaceSet))
+	}
+	return core
+}
+
+func requiredLandmarkSetDescription(set *syntax.CharSet) string {
+	if set == nil {
+		return "<nil>"
+	}
+	return set.String()
 }
 
 func getFuncCallIfEqual(set *syntax.CharSet, negate bool, setB *syntax.CharSet, negSetB *syntax.CharSet, funcName string, chExpr string) (string, bool) {

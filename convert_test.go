@@ -15,18 +15,21 @@ import (
 )
 
 func problem(t *testing.T, input string, args ...interface{}) {
+	t.Helper()
 	t.Errorf(input, args...)
 }
 
 func validateNoMatch(t *testing.T, pattern string, m string, toMatch string) {
+	t.Helper()
 	if len(m) == 0 || m == "No match\n" {
 		return
 	}
 
-	problem(t, "Expected no match for pattern '%v' with input '%v', but got '%v'", pattern, toMatch, m)
+	problem(t, "Expected no match\npattern: %q\ninput:   %q\noutput:  %q", pattern, toMatch, m)
 }
 
 func validateMatch(t *testing.T, pattern string, m string, line, toMatch string) {
+	t.Helper()
 	if len(m) == 0 {
 		// already error'd earlier up stream
 		return
@@ -34,7 +37,7 @@ func validateMatch(t *testing.T, pattern string, m string, line, toMatch string)
 
 	if m == "No match\n" {
 		// we didn't match, but should have
-		problem(t, "Expected match for pattern '%v' with input '%v', but got no match", pattern, toMatch)
+		problem(t, "Expected match\npattern: %q\ninput:   %q\nwant:    %q\noutput:  %q", pattern, toMatch, line, m)
 		return
 	}
 
@@ -42,16 +45,18 @@ func validateMatch(t *testing.T, pattern string, m string, line, toMatch string)
 	lines := strings.Split(m, "\n")
 	if !slices.Contains(lines, line) {
 		// we did not find our line in the input
-		problem(t, "Did not find expected line '%s' for pattern '%v' with input '%v'. Got '%s'", line, pattern, toMatch, m)
+		problem(t, "Missing expected match line\npattern: %q\ninput:   %q\nwant:    %q\noutput:  %q\nlines:   %#v", pattern, toMatch, line, m, lines)
 	}
 }
 
 // returns the path to an executable for running tests against this pattern
 func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) string {
+	t.Helper()
 	genPattern, err := os.CreateTemp("", "*.go")
 	if err != nil {
 		panic("could not create tmp file: " + err.Error())
 	}
+	t.Logf("generated regex source\npattern: %q\noptions: %v\nsource:  %s", pattern, opts, genPattern.Name())
 	c, err := newConverter(genPattern, "main")
 	if err != nil {
 		t.Error(errors.Wrap(err, "code generation error"))
@@ -82,18 +87,21 @@ func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) 
 	// build!
 	cmd := exec.Command(goPath, "build", "-o", outFile.Name(), genPattern.Name(), mainFile.Name())
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Log(string(out))
-		t.Errorf("build error for pattern %v", pattern)
+		t.Logf("generated regex build failed\npattern: %q\nsource:  %s\nmain:    %s\noutput:  %s", pattern, genPattern.Name(), mainFile.Name(), string(out))
+		t.Errorf("build error for pattern %q", pattern)
 		os.Remove(outFile.Name()) // nolint:errcheck
 		return ""
 	}
 
 	// our executable!
+	t.Logf("compiled regex test binary\npattern: %q\nsource:  %s\nmain:    %s\nbinary:  %s", pattern, genPattern.Name(), mainFile.Name(), outFile.Name())
 	return outFile.Name()
 }
 
 func matchString(t *testing.T, pattern string, reExec string, toMatch string) string {
+	t.Helper()
 	if len(reExec) == 0 {
+		t.Logf("skipping match because regex executable was not built\npattern: %q\ninput:   %q", pattern, toMatch)
 		return ""
 	}
 
@@ -106,7 +114,7 @@ func matchString(t *testing.T, pattern string, reExec string, toMatch string) st
 	cmd := exec.Command(reExec, escp)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		problem(t, "Error matching \"%v\" in pattern \"%v\": %v", toMatch, pattern, err)
+		problem(t, "Error running generated regex\npattern: %q\ninput:   %q\nbinary:  %s\nerror:   %v\noutput:  %q", pattern, toMatch, reExec, err, string(out))
 	}
 	//t.Logf("Result: %v", string(out))
 	return string(out)

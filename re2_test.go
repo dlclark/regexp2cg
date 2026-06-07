@@ -46,6 +46,23 @@ func TestRE2Dollar_Multiline(t *testing.T) {
 	runMatch(t, pattern, exec, "ac\n", " 0: ac\\x0a")
 }
 
+func TestRE2RequiredLandmarkChain(t *testing.T) {
+	pattern := `(?P<name>[-\w\d\.]+?)(?:\s+at\s+|\s*@\s*|\s*(?:[\[\]@]){3}\s*)(?P<host>[-\w\d\.]*?)\s*(?:dot|\.|(?:[\[\]dot\.]){3,5})\s*(?P<domain>\w+)`
+	tree, err := syntax.Parse(pattern, syntax.ParseOptions{RegexOptions: syntax.RE2, CodeGen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := tree.FindOptimizations.FindMode, syntax.RequiredLandmarkChain_LeftToRight; got != want {
+		t.Fatalf("FindMode = %v, want %v", got, want)
+	}
+
+	exec := generateAndCompile(t, pattern, syntax.RE2)
+	runMatch(t, pattern, exec, "contact user at example dot com", " 0: user at example dot com")
+	runMatch(t, pattern, exec, "contact user@@@example...com", " 0: user@@@example...com")
+	runNoMatch(t, pattern, exec, "contact user near example dash com")
+	//t.Fail()
+}
+
 func TestRE2ExtendedZero(t *testing.T) {
 	notZero := "߀" // \u07c0
 
