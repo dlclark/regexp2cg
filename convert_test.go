@@ -49,6 +49,13 @@ func validateMatch(t *testing.T, pattern string, m string, line, toMatch string)
 	}
 }
 
+func TestLargeEmptyRepeatIsReduced(t *testing.T) {
+	pattern := `a(?:){50000000}b`
+	exec := generateAndCompile(t, pattern, 0)
+	runMatch(t, pattern, exec, "ab", " 0: ab")
+	runNoMatch(t, pattern, exec, "ac")
+}
+
 // returns the path to an executable for running tests against this pattern
 func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) string {
 	t.Helper()

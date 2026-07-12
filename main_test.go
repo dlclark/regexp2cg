@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dlclark/regexp2/v2"
 	"github.com/dlclark/regexp2/v2/syntax"
 )
 
@@ -49,10 +50,10 @@ func TestIsStaticCompileCall_V2CompileOptions(t *testing.T) {
 		},
 		{
 			name:               "mixed regex and runtime optimization options",
-			expr:               `regexp2.MustCompile("abc", regexp2.IgnoreCase, regexp2.OptionMaxCachedRuneBufferLength(64*1024), regexp2.OptionMaxCachedReplaceBufferLength(64*1024), regexp2.OptionMaxCachedReplacerDataEntries(8), regexp2.OptionMaxCachedReplacerDataBytes(1024))`,
+			expr:               `regexp2.MustCompile("abc", regexp2.IgnoreCase, regexp2.OptionMaxBacktrackingStackSize(4096), regexp2.OptionMaxCachedRuneBufferLength(64*1024), regexp2.OptionMaxCachedReplaceBufferLength(64*1024), regexp2.OptionMaxCachedReplacerDataEntries(8), regexp2.OptionMaxCachedReplacerDataBytes(1024))`,
 			wantPat:            "abc",
 			wantOpts:           syntax.IgnoreCase,
-			wantCompileOptions: []string{"regexp2.IgnoreCase", "regexp2.OptionMaxCachedRuneBufferLength(64 * 1024)", "regexp2.OptionMaxCachedReplaceBufferLength(64 * 1024)", "regexp2.OptionMaxCachedReplacerDataEntries(8)", "regexp2.OptionMaxCachedReplacerDataBytes(1024)"},
+			wantCompileOptions: []string{"regexp2.IgnoreCase", "regexp2.OptionMaxBacktrackingStackSize(4096)", "regexp2.OptionMaxCachedRuneBufferLength(64 * 1024)", "regexp2.OptionMaxCachedReplaceBufferLength(64 * 1024)", "regexp2.OptionMaxCachedReplacerDataEntries(8)", "regexp2.OptionMaxCachedReplacerDataBytes(1024)"},
 		},
 		{
 			name:               "or expression mixed with runtime and trailing regex option",
@@ -105,6 +106,35 @@ func TestIsStaticCompileCall_V2CompileOptions(t *testing.T) {
 	}
 }
 
+func TestGeneratedLeadingSetStringPrefixFilter(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", `[a-c]`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, `StringPrefixFilter: MyPattern_StringPrefixFilter`) {
+		t.Fatalf("generated engine does not register a leading-set string prefilter:\n%s", got)
+	}
+	if !strings.Contains(got, `input[i] >= 'a' && input[i] <= 'c'`) {
+		t.Fatalf("generated leading-set prefilter does not scan the ASCII range:\n%s", got)
+	}
+}
+
+func TestGeneratedLeadingSetStringPrefixFilterMatchesUTF8Input(t *testing.T) {
+	pattern := `[a-c]`
+	exec := generateAndCompile(t, pattern, 0)
+	runMatch(t, pattern, exec, "ééb", " 0: b")
+	runNoMatch(t, pattern, exec, "ééz")
+}
+
 func TestGeneratedRegisterEngineUsesV2Signature(t *testing.T) {
 	var buf bytes.Buffer
 	c, err := newConverter(&buf, "main")
@@ -142,6 +172,106 @@ func TestGeneratedRegisterEngineUsesV2Signature(t *testing.T) {
 	}
 	if !strings.Contains(got, `}, regexp2.IgnoreCase, regexp2.OptionMaintainCaptureOrder())`) {
 		t.Fatalf("generated RegisterEngine call does not pass compile options after RuntimeEngineData:\n%s", got)
+	}
+}
+
+func TestGeneratedQuickExecuteElidesUnusedCapture(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", `(a+)b`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, `ExecuteQuick:`) || !strings.Contains(got, `MyPattern_ExecuteQuick,`) {
+		t.Fatalf("generated engine does not register a quick executor:\n%s", got)
+	}
+	if !strings.Contains(got, `func MyPattern_ExecuteQuick(r *regexp2.Runner) error`) {
+		t.Fatalf("generated engine does not define its quick executor:\n%s", got)
+	}
+	quick := got[strings.Index(got, `func MyPattern_ExecuteQuick`):]
+	if strings.Contains(quick, `r.Capture(1,`) {
+		t.Fatalf("quick executor retains unused capture 1:\n%s", quick)
+	}
+	if !strings.Contains(quick, `r.Capture(0,`) {
+		t.Fatalf("quick executor does not retain the match-success capture:\n%s", quick)
+	}
+}
+
+func TestGeneratedQuickExecuteRetainsReferencedCapture(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", `(a+)\1`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := buf.String(); strings.Contains(got, `ExecuteQuick:`) {
+		t.Fatalf("generated engine emitted a redundant quick executor when every capture is observable:\n%s", got)
+	}
+}
+
+func TestGeneratedBacktrackingStackLimitCheck(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		option     string
+		wantChecks bool
+	}{
+		{name: "bounded", option: "regexp2.OptionMaxBacktrackingStackSize(4096)", wantChecks: true},
+		{name: "unbounded", option: "regexp2.OptionMaxBacktrackingStackSize(-1)", wantChecks: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			c, err := newConverter(&buf, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.addRegexp("MyFile.go:120:10", "MyPattern", `(a|b)*c`, 0, false, []string{tt.option}); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.addFooter(); err != nil {
+				t.Fatal(err)
+			}
+
+			got := buf.String()
+			hasChecks := strings.Contains(got, `r.StackDepth() >`) && strings.Contains(got, `return regexp2.ErrBacktrackingStackLimit`)
+			if hasChecks != tt.wantChecks {
+				t.Fatalf("generated stack checks = %v, want %v:\n%s", hasChecks, tt.wantChecks, got)
+			}
+		})
+	}
+}
+
+func TestGetMaxBacktrackingStackSize(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		options []string
+		want    int
+	}{
+		{name: "default", want: regexp2.DefaultOptimizationOptions.MaxBacktrackingStackSize},
+		{name: "constant expression", options: []string{"regexp2.OptionMaxBacktrackingStackSize(64 * 1024)"}, want: 64 * 1024},
+		{name: "unbounded", options: []string{"regexp2.OptionMaxBacktrackingStackSize(-1)"}, want: -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := getMaxBacktrackingStackSize(tt.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("getMaxBacktrackingStackSize() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"go/ast"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"strconv"
 
 	"fmt"
@@ -13,6 +16,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/dlclark/regexp2/v2"
 	"github.com/dlclark/regexp2/v2/syntax"
 	"github.com/pkg/errors"
 )
@@ -28,6 +32,7 @@ type converter struct {
 	requiredHelpers map[string]string
 
 	convertedNames map[string]int
+	emittingRegexp *regexpData
 
 	err error
 }
@@ -92,13 +97,17 @@ func (c *converter) addFooter() error {
 		if rm.StringPrefixFilterName != "" {
 			stringPrefixFilter = fmt.Sprintf("\n\tStringPrefixFilter: %s,", rm.StringPrefixFilterName)
 		}
+		quickExecute := ""
+		if rm.QuickCaptureSlots != nil {
+			quickExecute = fmt.Sprintf("\n\tExecuteQuick: %s_ExecuteQuick,", rm.GeneratedName)
+		}
 		c.writeLineFmt(`regexp2.RegisterEngine(%v, regexp2.RuntimeEngineData{
 	Caps: %v,
 	CapNames: %v,
 	CapsList: %v,
 	CapSize: %v,
 	FindFirstChar: %s_FindFirstChar,
-	Execute: %[6]s_Execute,%[8]s
+	Execute: %[6]s_Execute,%[8]s%[9]s
 }%[7]s)`,
 			getGoLiteral(rm.Pattern),
 			getGoLiteral(rm.Tree.Caps),
@@ -107,7 +116,8 @@ func (c *converter) addFooter() error {
 			rm.Tree.Captop,
 			rm.GeneratedName,
 			compileOptions,
-			stringPrefixFilter)
+			stringPrefixFilter,
+			quickExecute)
 	}
 	// emit basic usage of imports so we don't have to deal with import re-writing
 	c.writeLine("var _ = helpers.Min")
@@ -130,12 +140,14 @@ func (c *converter) addFooter() error {
 }
 
 type regexpData struct {
-	SourceLocation         string
-	GeneratedName          string
-	Pattern                string
-	Options                syntax.RegexOptions
-	CompileOptions         []string
-	StringPrefixFilterName string
+	SourceLocation           string
+	GeneratedName            string
+	Pattern                  string
+	Options                  syntax.RegexOptions
+	CompileOptions           []string
+	StringPrefixFilterName   string
+	MaxBacktrackingStackSize int
+	QuickCaptureSlots        []bool
 	// MaintainCaptureOrder changes capture slot assignment, so it is part of the generated engine identity.
 	MaintainCaptureOrder bool
 	Tree                 *syntax.RegexTree
@@ -157,6 +169,7 @@ type regexpData struct {
 	topLevelDoneLabel     string
 	expressionHasCaptures bool
 	doneLabel             string
+	quickMode             bool
 
 	// track our labels since Go doesn't like unused labels, we need to find them and
 	// remove them as a post-process step
@@ -189,9 +202,14 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	// check if already converted
 	for _, data := range c.data {
 		// match!  we're done here
-		if data.Pattern == txt && data.Options == opt && data.MaintainCaptureOrder == maintainCaptureOrder {
+		if data.Pattern == txt && data.Options == opt && data.MaintainCaptureOrder == maintainCaptureOrder && slices.Equal(data.CompileOptions, compileOptions) {
 			return nil
 		}
+	}
+
+	maxBacktrackingStackSize, err := getMaxBacktrackingStackSize(compileOptions)
+	if err != nil {
+		return err
 	}
 
 	// parse pattern
@@ -227,36 +245,149 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	c.writeLineFmt("/*\n%s*/", tree.Dump())
 
 	rm := &regexpData{
-		SourceLocation:       sourceLocation,
-		GeneratedName:        newName,
-		Pattern:              txt,
-		Options:              opt,
-		CompileOptions:       compileOptions,
-		MaintainCaptureOrder: maintainCaptureOrder,
-		Tree:                 tree,
-		Analysis:             analyze(tree),
+		SourceLocation:           sourceLocation,
+		GeneratedName:            newName,
+		Pattern:                  txt,
+		Options:                  opt,
+		CompileOptions:           compileOptions,
+		MaxBacktrackingStackSize: maxBacktrackingStackSize,
+		MaintainCaptureOrder:     maintainCaptureOrder,
+		Tree:                     tree,
+		Analysis:                 analyze(tree),
 	}
 	c.data = append(c.data, rm)
 
 	c.emitRegexStart(rm)
+	code, err := syntax.Write(tree)
+	if err != nil {
+		return errors.Wrap(err, "error analyzing quick captures")
+	}
+	if slices.Contains(code.CaptureSlotInUse, false) {
+		rm.QuickCaptureSlots = code.CaptureSlotInUse
+	}
 
 	// we need to emit 2 functions: FindFirstChar() and Execute()
 	// the C# version has a "scan" function above these that I've omitted here
 	c.emitFindFirstChar(rm)
 	c.emitStringPrefixFilter(rm)
-	c.emitExecute(rm)
+	c.emitExecuteFunction(rm)
+	if rm.QuickCaptureSlots != nil {
+		rm.quickMode = true
+		c.emitExecuteFunction(rm)
+		rm.quickMode = false
+	}
 
 	// get our string for final manipulation
 	output := c.buf.String()
 	c.buf = oldOut
 
 	// finalize our code
-	removeUnusedLabels(&output, rm)
-
 	// write our temp out buffer into our saved buffer
 	c.buf.Write([]byte(output))
 
 	return c.err
+}
+
+func (c *converter) emitExecuteFunction(rm *regexpData) {
+	oldOut := c.buf
+	oldRegexp := c.emittingRegexp
+	c.buf = &bytes.Buffer{}
+	c.emittingRegexp = rm
+	rm.emittedLabels = nil
+	rm.usedLabels = nil
+	c.emitExecute(rm)
+	output := c.buf.String()
+	removeUnusedLabels(&output, rm)
+	c.buf = oldOut
+	c.emittingRegexp = oldRegexp
+	c.buf.WriteString(output)
+}
+
+func getMaxBacktrackingStackSize(compileOptions []string) (int, error) {
+	limit := regexp2.DefaultOptimizationOptions.MaxBacktrackingStackSize
+	const prefix = "regexp2.OptionMaxBacktrackingStackSize("
+	for _, option := range compileOptions {
+		if !strings.HasPrefix(option, prefix) || !strings.HasSuffix(option, ")") {
+			continue
+		}
+		expr, err := parser.ParseExpr(strings.TrimSuffix(strings.TrimPrefix(option, prefix), ")"))
+		if err != nil {
+			return 0, errors.Wrap(err, "invalid OptionMaxBacktrackingStackSize")
+		}
+		limit, err = evalIntegerConstant(expr)
+		if err != nil {
+			return 0, errors.Wrap(err, "OptionMaxBacktrackingStackSize must be a constant integer")
+		}
+	}
+	return limit, nil
+}
+
+func evalIntegerConstant(expr ast.Expr) (int, error) {
+	switch expr := expr.(type) {
+	case *ast.BasicLit:
+		if expr.Kind != token.INT {
+			break
+		}
+		value, err := strconv.ParseInt(expr.Value, 0, 64)
+		return int(value), err
+	case *ast.ParenExpr:
+		return evalIntegerConstant(expr.X)
+	case *ast.UnaryExpr:
+		value, err := evalIntegerConstant(expr.X)
+		if err != nil {
+			return 0, err
+		}
+		switch expr.Op {
+		case token.ADD:
+			return value, nil
+		case token.SUB:
+			return -value, nil
+		case token.XOR:
+			return ^value, nil
+		}
+	case *ast.BinaryExpr:
+		left, err := evalIntegerConstant(expr.X)
+		if err != nil {
+			return 0, err
+		}
+		right, err := evalIntegerConstant(expr.Y)
+		if err != nil {
+			return 0, err
+		}
+		switch expr.Op {
+		case token.ADD:
+			return left + right, nil
+		case token.SUB:
+			return left - right, nil
+		case token.MUL:
+			return left * right, nil
+		case token.AND:
+			return left & right, nil
+		case token.OR:
+			return left | right, nil
+		case token.XOR:
+			return left ^ right, nil
+		case token.AND_NOT:
+			return left &^ right, nil
+		case token.QUO:
+			if right != 0 {
+				return left / right, nil
+			}
+		case token.REM:
+			if right != 0 {
+				return left % right, nil
+			}
+		case token.SHL:
+			if right >= 0 {
+				return left << right, nil
+			}
+		case token.SHR:
+			if right >= 0 {
+				return left >> right, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("unsupported integer expression")
 }
 
 func removeUnusedLabels(output *string, rm *regexpData) {
@@ -306,6 +437,7 @@ var optNames = []string{
 }
 
 var runtimeCompileOptionNames = []string{
+	"OptionMaxBacktrackingStackSize",
 	"OptionMaxCachedRuneBufferLength",
 	"OptionMaxCachedReplaceBufferLength",
 	"OptionMaxCachedReplacerDataEntries",

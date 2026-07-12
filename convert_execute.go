@@ -16,7 +16,11 @@ import (
 const MaxUnrollSize = 16
 
 func (c *converter) emitExecute(rm *regexpData) {
-	c.writeLineFmt("func %s_Execute(r *regexp2.Runner) error {", rm.GeneratedName)
+	executeName := rm.GeneratedName + "_Execute"
+	if rm.quickMode {
+		executeName += "Quick"
+	}
+	c.writeLineFmt("func %s(r *regexp2.Runner) error {", executeName)
 	//c.writeLine(`fmt.Println("Execute")`)
 	defer func() {
 		c.writeLine("}\n")
@@ -2743,6 +2747,10 @@ func mapCaptureNumber(capNum int, caps map[int]int) int {
 func (c *converter) emitExecuteCapture(rm *regexpData, node *syntax.RegexNode, subsequent *syntax.RegexNode) {
 	capnum := mapCaptureNumber(node.M, rm.Tree.Caps)
 	uncapnum := mapCaptureNumber(node.N, rm.Tree.Caps)
+	if rm.quickMode && uncapnum == -1 && capnum >= 0 && capnum < len(rm.QuickCaptureSlots) && !rm.QuickCaptureSlots[capnum] {
+		c.emitExecuteNode(rm, node.Children[0], subsequent, true)
+		return
+	}
 	isAtomic := rm.Analysis.IsAtomicByAncestor(node)
 	isInLoop := rm.Analysis.IsInLoop(node)
 
@@ -3061,6 +3069,14 @@ func (c *converter) validateStackCookieWithAdditionAndReturnPoppedStack(stackCoo
 */
 
 func (c *converter) emitStackPush(stackCookie int, args ...string) {
+	if limit := c.emittingRegexp.MaxBacktrackingStackSize; limit >= 0 {
+		maxDepth := limit - len(args)
+		if maxDepth < 0 {
+			c.writeLine("return regexp2.ErrBacktrackingStackLimit")
+			return
+		}
+		c.writeLineFmt("if r.StackDepth() > %d { return regexp2.ErrBacktrackingStackLimit }", maxDepth)
+	}
 	switch len(args) {
 	case 1:
 		c.writeLineFmt("r.StackPush(%s)", args[0])

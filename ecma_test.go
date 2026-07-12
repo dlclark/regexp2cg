@@ -29,3 +29,10 @@ func TestECMAScriptNonUnicodeSlashPIsLiteral(t *testing.T) {
 	runMatch(t, pattern, exec, "p{L}", " 0: p{L}")
 	runNoMatch(t, pattern, exec, "abc")
 }
+
+func TestECMAScriptIgnoreCaseComplementClass(t *testing.T) {
+	pattern := `^\D$`
+	exec := generateAndCompile(t, pattern, syntax.ECMAScript|syntax.IgnoreCase)
+	runMatch(t, pattern, exec, "t", " 0: t")
+	runNoMatch(t, pattern, exec, "1")
+}
