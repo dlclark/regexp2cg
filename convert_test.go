@@ -56,6 +56,12 @@ func TestLargeEmptyRepeatIsReduced(t *testing.T) {
 	runNoMatch(t, pattern, exec, "ac")
 }
 
+func TestIgnoreCaseAlternationMatchesWholeBranch(t *testing.T) {
+	pattern := `(?i:'s|'t|'re)`
+	exec := generateAndCompile(t, pattern, 0)
+	runMatch(t, pattern, exec, "'RE", " 0: 'RE")
+}
+
 // returns the path to an executable for running tests against this pattern
 func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) string {
 	t.Helper()
