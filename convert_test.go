@@ -62,6 +62,42 @@ func TestIgnoreCaseAlternationMatchesWholeBranch(t *testing.T) {
 	runMatch(t, pattern, exec, "'RE", " 0: 'RE")
 }
 
+func TestGeneratedSyntaxExtensions(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		options syntax.RegexOptions
+		input   string
+		match   string
+	}{
+		{name: "literal quoting", pattern: `\A\Qfoo.bar[0]+\E\z`, input: `foo.bar[0]+`, match: ` 0: foo.bar[0]+`},
+		{name: "unicode newline", pattern: `\A\R{2}\z`, input: "\r\n\n", match: ` 0: \x0d\x0a\x0a`},
+		{name: "unicode newline right to left", pattern: `\R`, options: syntax.RightToLeft, input: "x\r\ny", match: ` 0: \x0d\x0a`},
+		{name: "grapheme clusters", pattern: `\A\X{3}\z`, input: "a\u0301b\r\n", match: ` 0: a\xcc\x81b\x0d\x0a`},
+		{name: "grapheme right to left", pattern: `\X`, options: syntax.RightToLeft, input: "a\u0301b", match: " 0: b"},
+		{name: "unicode property aliases", pattern: `\A\p{InCB=Linker}\z`, input: "\u094D", match: ` 0: \xe0\xa5\x8d`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exec := generateAndCompile(t, tt.pattern, tt.options)
+			runMatch(t, tt.pattern, exec, tt.input, tt.match)
+		})
+	}
+}
+
+func TestGraphemeIsAtomic(t *testing.T) {
+	pattern := `\A\X\p{GCB=Extend}\z`
+	exec := generateAndCompile(t, pattern, 0)
+	runNoMatch(t, pattern, exec, "a\u0301")
+}
+
+func TestPossessiveQuantifierDoesNotBacktrack(t *testing.T) {
+	pattern := `\Aa++a\z`
+	exec := generateAndCompile(t, pattern, 0)
+	runNoMatch(t, pattern, exec, "aa")
+}
+
 // returns the path to an executable for running tests against this pattern
 func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) string {
 	t.Helper()

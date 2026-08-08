@@ -342,6 +342,8 @@ func computeMaxLength(node *syntax.RegexNode) int {
 	switch node.T {
 	case syntax.NtOne, syntax.NtNotone, syntax.NtSet:
 		return 1
+	case syntax.NtGrapheme:
+		return -1
 	case syntax.NtMulti:
 		return len(node.Str)
 	case syntax.NtNotonelazy, syntax.NtNotoneloop, syntax.NtNotoneloopatomic,
@@ -1178,18 +1180,17 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 	// we get smaller code), and it's what we'd do for the fallback (which we get to avoid generating) as part of CharInClass,
 	// but without the optimizations the C# compiler will provide for switches.
 	cats, neg := set.GetIfOnlyUnicodeCategories()
-	if len(cats) > 0 {
+	if names, ok := getUnicodeRangeTableNames(cats); ok {
 		negate = (negate != neg)
-		// convert cats to strings
 		sb := &bytes.Buffer{}
 		if negate {
 			sb.WriteString("!")
 		}
 		sb.WriteString("unicode.In(")
 		sb.WriteString(chExpr)
-		for _, cat := range cats {
+		for _, name := range names {
 			sb.WriteString(", unicode.")
-			sb.WriteString(getUnicodeRangeTableName(cat.Cat))
+			sb.WriteString(name)
 		}
 		sb.WriteString(")")
 		return sb.String()
@@ -1443,9 +1444,29 @@ func (c *converter) emitAllAsciiContained(negate bool, chExpr string, set *synta
 	return fmt.Sprintf("%s < 128 || %s.CharIn(%[1]s)", chExpr, setField)
 }
 
-func getUnicodeRangeTableName(cat string) string {
-	if alias, ok := unicode.CategoryAliases[cat]; ok {
-		return alias
+func getUnicodeRangeTableNames(cats []syntax.Category) ([]string, bool) {
+	if len(cats) == 0 {
+		return nil, false
 	}
-	return cat
+
+	names := make([]string, len(cats))
+	for i, cat := range cats {
+		name := cat.Cat
+		if alias, ok := unicode.CategoryAliases[name]; ok {
+			name = alias
+		}
+		if _, ok := unicode.Categories[name]; !ok {
+			if _, ok := unicode.Scripts[name]; !ok {
+				if _, ok := unicode.Properties[name]; !ok {
+					// regexp2 also supports package-local Unicode 17 tables (for
+					// example Grapheme_Cluster_Break and Indic_Conjunct_Break).
+					// Those don't have exported unicode package identifiers, so let
+					// the general serialized CharSet path handle them.
+					return nil, false
+				}
+			}
+		}
+		names[i] = name
+	}
+	return names, true
 }

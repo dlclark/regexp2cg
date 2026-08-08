@@ -247,6 +247,10 @@ func (c *converter) emitExecuteNode(rm *regexpData, node *syntax.RegexNode, subs
 			return
 		}
 
+	case syntax.NtGrapheme:
+		c.emitExecuteGrapheme(rm, node)
+		return
+
 	case syntax.NtUpdateBumpalong:
 		c.emitExecuteUpdateBumpalong(rm, node)
 		return
@@ -316,6 +320,25 @@ func (c *converter) emitExecuteNode(rm *regexpData, node *syntax.RegexNode, subs
 	//}
 
 	panic(fmt.Sprintf("unhandled node: %v", node))
+}
+
+// Emits code to consume one Unicode extended grapheme cluster. Grapheme
+// clusters are variable-width, so materialize any pending static offset before
+// asking regexp2's Unicode boundary implementation for the next position.
+func (c *converter) emitExecuteGrapheme(rm *regexpData, node *syntax.RegexNode) {
+	c.transferSliceStaticPosToPos(rm, false)
+
+	boundaryFunc := "syntax.NextGraphemeClusterBoundary"
+	if node.Options&syntax.RightToLeft != 0 {
+		boundaryFunc = "syntax.PreviousGraphemeClusterBoundary"
+	}
+
+	c.writeLineFmt("if next := %s(r.Runtext, pos); next < 0 {", boundaryFunc)
+	c.emitExecuteGoto(rm, rm.doneLabel)
+	c.writeLine("} else {")
+	c.writeLine("pos = next")
+	c.writeLine("}")
+	c.sliceInputSpan(rm, false)
 }
 
 // Emits the node for an atomic.
@@ -3207,6 +3230,8 @@ func describeNode(rm *regexpData, node *syntax.RegexNode) string {
 		return "Match if at the end of the string or if before an ending newline."
 	case syntax.NtEol:
 		return "Match if at the end of a line."
+	case syntax.NtGrapheme:
+		return "Match one Unicode extended grapheme cluster."
 	case syntax.NtLoop, syntax.NtLazyloop:
 		if node.M == 0 && node.N == 1 {
 			ty := "lazy"

@@ -527,13 +527,12 @@ func getRuneLiteralParams(in []rune) string {
 	}
 
 	buf := &bytes.Buffer{}
-	sep := "'"
+	sep := ""
 	for _, ch := range in {
 		buf.WriteString(sep)
-		buf.WriteRune(ch)
-		sep = "', '"
+		_, _ = fmt.Fprintf(buf, "%q", ch)
+		sep = ", "
 	}
-	buf.WriteRune('\'')
 	return buf.String()
 }
 
