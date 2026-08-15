@@ -107,7 +107,9 @@ func (c *converter) addFooter() error {
 	CapsList: %v,
 	CapSize: %v,
 	FindFirstChar: %s_FindFirstChar,
-	Execute: %[6]s_Execute,%[8]s%[9]s
+	Execute: %[6]s_Execute,
+	LeftContextKnown: true,
+	LeftContextRunes: %[10]d,%[8]s%[9]s
 }%[7]s)`,
 			getGoLiteral(rm.Pattern),
 			getGoLiteral(rm.Tree.Caps),
@@ -117,7 +119,8 @@ func (c *converter) addFooter() error {
 			rm.GeneratedName,
 			compileOptions,
 			stringPrefixFilter,
-			quickExecute)
+			quickExecute,
+			rm.LeftContextRunes)
 	}
 	// emit basic usage of imports so we don't have to deal with import re-writing
 	c.writeLine("var _ = helpers.Min")
@@ -148,6 +151,7 @@ type regexpData struct {
 	StringPrefixFilterName   string
 	MaxBacktrackingStackSize int
 	QuickCaptureSlots        []bool
+	LeftContextRunes         int
 	// MaintainCaptureOrder changes capture slot assignment, so it is part of the generated engine identity.
 	MaintainCaptureOrder bool
 	Tree                 *syntax.RegexTree
@@ -265,6 +269,7 @@ func (c *converter) addRegexp(sourceLocation, name string, txt string, opt synta
 	if slices.Contains(code.CaptureSlotInUse, false) {
 		rm.QuickCaptureSlots = code.CaptureSlotInUse
 	}
+	rm.LeftContextRunes = code.LeftContextRunes
 
 	// we need to emit 2 functions: FindFirstChar() and Execute()
 	// the C# version has a "scan" function above these that I've omitted here

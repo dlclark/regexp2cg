@@ -98,6 +98,97 @@ func TestPossessiveQuantifierDoesNotBacktrack(t *testing.T) {
 	runNoMatch(t, pattern, exec, "aa")
 }
 
+func TestGeneratedLeftContextWordBoundary(t *testing.T) {
+	pattern := `\bfoo`
+	exec := generateAndCompile(t, pattern, 0)
+	runNoMatch(t, pattern, exec, "xxxfoo")
+	runMatch(t, pattern, exec, "xxx foo", " 0: foo")
+}
+
+func TestGeneratedLeftContextLookbehind(t *testing.T) {
+	pattern := `(?<=x)foo`
+	exec := generateAndCompile(t, pattern, 0)
+	runNoMatch(t, pattern, exec, strings.Repeat("z", 40)+"yfoo")
+	runMatch(t, pattern, exec, strings.Repeat("z", 40)+"xfoo", " 0: foo")
+}
+
+func TestGeneratedLeadingStringsFindMode(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addRegexp("MyFile.go:1:1", "MyPattern", `(?:apple|tiger)\d+`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "multiple strings that could begin the match") {
+		t.Fatalf("expected leading-strings find mode, generated:\n%s", got)
+	}
+
+	exec := generateAndCompile(t, `(?:apple|tiger)\d+`, 0)
+	runMatch(t, `(?:apple|tiger)\d+`, exec, strings.Repeat("z", 200)+"tiger9", " 0: tiger9")
+}
+
+func TestGeneratedNegatedClassIsNotLeadingStrings(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addRegexp("MyFile.go:1:1", "MyPattern", `a[^bc]d`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "multiple strings that could begin the match") {
+		t.Fatalf("negated class was treated as leading strings:\n%s", got)
+	}
+
+	exec := generateAndCompile(t, `a[^bc]d`, 0)
+	runMatch(t, `a[^bc]d`, exec, "aed", " 0: aed")
+	runNoMatch(t, `a[^bc]d`, exec, "abd")
+}
+
+func TestGeneratedLeftContextMetadata(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    int
+	}{
+		{pattern: `foo`, want: 0},
+		{pattern: `\bfoo`, want: 1},
+		{pattern: `(?m)^foo`, want: 1},
+		{pattern: `\Afoo`, want: 1},
+		{pattern: `(?<=x)foo`, want: -1},
+		{pattern: `\Gfoo`, want: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			var buf bytes.Buffer
+			c, err := newConverter(&buf, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.addRegexp("MyFile.go:1:1", "MyPattern", tt.pattern, 0, false, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.addFooter(); err != nil {
+				t.Fatal(err)
+			}
+			want := fmt.Sprintf("LeftContextRunes:%d", tt.want)
+			got := strings.ReplaceAll(buf.String(), " ", "")
+			if !strings.Contains(got, want) {
+				t.Fatalf("generated engine missing LeftContextRunes: %d:\n%s", tt.want, buf.String())
+			}
+		})
+	}
+}
+
 // returns the path to an executable for running tests against this pattern
 func generateAndCompile(t *testing.T, pattern string, opts syntax.RegexOptions) string {
 	t.Helper()

@@ -173,6 +173,9 @@ func TestGeneratedRegisterEngineUsesV2Signature(t *testing.T) {
 	if !strings.Contains(got, `}, regexp2.IgnoreCase, regexp2.OptionMaintainCaptureOrder())`) {
 		t.Fatalf("generated RegisterEngine call does not pass compile options after RuntimeEngineData:\n%s", got)
 	}
+	if !strings.Contains(got, `LeftContextKnown:`) || !strings.Contains(got, `LeftContextRunes:`) {
+		t.Fatalf("generated RegisterEngine call does not publish left-context decode metadata:\n%s", got)
+	}
 }
 
 func TestGeneratedQuickExecuteElidesUnusedCapture(t *testing.T) {
