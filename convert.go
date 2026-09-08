@@ -68,6 +68,7 @@ func (c *converter) addHeader(packageName string) error {
 	c.writeLine("  \"github.com/dlclark/regexp2/v2/syntax\"")
 	c.writeLine("  \"strings\"")
 	c.writeLine("  \"unicode\"")
+	c.writeLine("  \"unicode/utf8\"")
 	//c.writeLine("  \"fmt\"")
 	c.writeLine(")")
 
@@ -127,6 +128,7 @@ func (c *converter) addFooter() error {
 	c.writeLine("var _ = syntax.NewCharSetRuntime")
 	c.writeLine("var _ = strings.Index")
 	c.writeLine("var _ = unicode.IsDigit")
+	c.writeLine("var _ = utf8.ValidString")
 	c.writeLine("}")
 
 	//format the code

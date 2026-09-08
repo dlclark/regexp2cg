@@ -135,6 +135,37 @@ func TestGeneratedLeadingSetStringPrefixFilterMatchesUTF8Input(t *testing.T) {
 	runNoMatch(t, pattern, exec, "ééz")
 }
 
+func TestGeneratedStringPrefixFilterHandlesInvalidUTF8(t *testing.T) {
+	for _, pattern := range []string{"�abc", "(?:�abc|xyz)"} {
+		t.Run(pattern, func(t *testing.T) {
+			exec := generateAndCompile(t, pattern, 0)
+			runMatch(t, pattern, exec, "x\xffabc", " 0: \\xffabc")
+		})
+	}
+}
+
+func TestGeneratedCharacterClassUsesContains(t *testing.T) {
+	var buf bytes.Buffer
+	c, err := newConverter(&buf, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addRegexp("MyFile.go:120:10", "MyPattern", `[\p{Greek}x]`, 0, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.addFooter(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := buf.String()
+	if strings.Contains(got, `.CharIn(`) {
+		t.Fatalf("generated character-class checks still copy CharSet values:\n%s", got)
+	}
+	if !strings.Contains(got, `.Contains(`) {
+		t.Fatalf("generated character-class checks do not use CharSet.Contains:\n%s", got)
+	}
+}
+
 func TestGeneratedRegisterEngineUsesV2Signature(t *testing.T) {
 	var buf bytes.Buffer
 	c, err := newConverter(&buf, "main")

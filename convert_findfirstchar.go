@@ -868,7 +868,7 @@ func (c *converter) emitRequiredLandmarkChain_LeftToRight(rm *regexpData) {
 		if candidate < pos {
 			candidate = pos
 		}
-		for candidate > pos && %s.CharIn(r.Runtext[candidate-1]) {
+		for candidate > pos && %s.Contains(r.Runtext[candidate-1]) {
 			candidate--
 		}
 		if candidate <= len(r.Runtext)-%d {
@@ -927,7 +927,7 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 
 	if alt.RequireWhitespaceBefore {
 		whitespaceSet := c.emitSetDefinition(alt.LeadingWhitespaceSet)
-		fmt.Fprintf(buf, `%s	if i == 0 || !%s.CharIn(r.Runtext[i-1]) {
+		fmt.Fprintf(buf, `%s	if i == 0 || !%s.Contains(r.Runtext[i-1]) {
 %s		%s
 %s	}
 `, indent, whitespaceSet, indent, failureJump, indent)
@@ -956,7 +956,7 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 			maxRepeat = alt.MinRepeat
 		}
 		fmt.Fprintf(buf, `%s	end := i
-%s	for end < len(r.Runtext) && end-i < %d && %s.CharIn(r.Runtext[end]) {
+%s	for end < len(r.Runtext) && end-i < %d && %s.Contains(r.Runtext[end]) {
 %s		end++
 %s	}
 %s	if end-i < %d {
@@ -967,7 +967,7 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 
 	if alt.RequireWhitespaceAfter {
 		whitespaceSet := c.emitSetDefinition(alt.TrailingWhitespaceSet)
-		fmt.Fprintf(buf, `%s	if end >= len(r.Runtext) || !%s.CharIn(r.Runtext[end]) {
+		fmt.Fprintf(buf, `%s	if end >= len(r.Runtext) || !%s.Contains(r.Runtext[end]) {
 %s		%s
 %s	}
 `, indent, whitespaceSet, indent, failureJump, indent)
@@ -982,7 +982,7 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 `, indent, indent, indent, indent, successLabel, indent)
 	} else {
 		fmt.Fprintf(buf, `%s	matchStart := i
-%s	for matchStart > 0 && %s.CharIn(r.Runtext[matchStart-1]) {
+%s	for matchStart > 0 && %s.Contains(r.Runtext[matchStart-1]) {
 %s		matchStart--
 %s	}
 %s	landmarkStart = matchStart
@@ -1260,7 +1260,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		negatedClass := set.IsNegated()
 		bitmap := uint32(0)
 		for i := analysis.LowerBoundInclusiveIfOnlyRanges; i < analysis.UpperBoundExclusiveIfOnlyRanges; i++ {
-			if set.CharIn(i) != negatedClass {
+			if set.Contains(i) != negatedClass {
 				bitmap |= 1 << (31 - (i - analysis.LowerBoundInclusiveIfOnlyRanges))
 			}
 		}
@@ -1294,7 +1294,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		negatedClass := set.IsNegated()
 		bitmap := uint64(0)
 		for i := analysis.LowerBoundInclusiveIfOnlyRanges; i < analysis.UpperBoundExclusiveIfOnlyRanges; i++ {
-			if set.CharIn(i) != negatedClass {
+			if set.Contains(i) != negatedClass {
 				bitmap |= 1 << (63 - (i - analysis.LowerBoundInclusiveIfOnlyRanges))
 			}
 		}
@@ -1366,7 +1366,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 	bitVector := make([]uint64, 2)
 
 	for i := rune(0); i < unicode.MaxASCII; i++ {
-		if set.CharIn(i) {
+		if set.Contains(i) {
 			bitVector[i/64] |= (1 << (i % 64))
 		}
 	}
@@ -1400,9 +1400,9 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 
 	setField := c.emitSetDefinition(set)
 	if negate {
-		return fmt.Sprintf("((%s >= 128 || !%s) && (%[1]s < 128 || !%[3]s.CharIn(%[1]s)))", chExpr, bitmapExpr, setField)
+		return fmt.Sprintf("((%s >= 128 || !%s) && (%[1]s < 128 || !%[3]s.Contains(%[1]s)))", chExpr, bitmapExpr, setField)
 	}
-	return fmt.Sprintf("((%s < 128 && %s) || (%[1]s >= 128 && %[3]s.CharIn(%[1]s)))", chExpr, bitmapExpr, setField)
+	return fmt.Sprintf("((%s < 128 && %s) || (%[1]s >= 128 && %[3]s.Contains(%[1]s)))", chExpr, bitmapExpr, setField)
 }
 
 func getRangeCheckClause(chExpr string, r syntax.SingleRange, negate bool) string {
@@ -1431,17 +1431,17 @@ func (c *converter) emitIndexOfAnyCustomHelper(rm *regexpData, set *syntax.CharS
 func (c *converter) emitContainsNoAscii(negate bool, chExpr string, set *syntax.CharSet) string {
 	setField := c.emitSetDefinition(set)
 	if negate {
-		return fmt.Sprintf("%s < 128 || !%s.CharIn(%[1]s)", chExpr, setField)
+		return fmt.Sprintf("%s < 128 || !%s.Contains(%[1]s)", chExpr, setField)
 	}
-	return fmt.Sprintf("%s >= 128 && %s.CharIn(%[1]s)", chExpr, setField)
+	return fmt.Sprintf("%s >= 128 && %s.Contains(%[1]s)", chExpr, setField)
 }
 
 func (c *converter) emitAllAsciiContained(negate bool, chExpr string, set *syntax.CharSet) string {
 	setField := c.emitSetDefinition(set)
 	if negate {
-		return fmt.Sprintf("%s >= 128 && !%s.CharIn(%[1]s)", chExpr, setField)
+		return fmt.Sprintf("%s >= 128 && !%s.Contains(%[1]s)", chExpr, setField)
 	}
-	return fmt.Sprintf("%s < 128 || %s.CharIn(%[1]s)", chExpr, setField)
+	return fmt.Sprintf("%s < 128 || %s.Contains(%[1]s)", chExpr, setField)
 }
 
 func getUnicodeRangeTableNames(cats []syntax.Category) ([]string, bool) {

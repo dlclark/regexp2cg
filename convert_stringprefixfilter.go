@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/dlclark/regexp2/v2/syntax"
 )
@@ -106,6 +108,15 @@ func (c *converter) emitStringPrefixFilterForPrefix(rm *regexpData, prefix strin
 	if ignoreCase {
 		indexExpr = fmt.Sprintf("helpers.IndexStringIgnoreCaseASCII(input[startAt:], %#[1]v)", prefix)
 	}
+	runeErrorFallback := ""
+	if strings.ContainsRune(prefix, utf8.RuneError) {
+		runeErrorFallback = `
+	// Invalid UTF-8 bytes decode as U+FFFD, so let the rune matcher inspect
+	// the input instead of searching only for the valid UTF-8 encoding.
+	if !utf8.ValidString(input[startAt:]) {
+		return startAt, true
+	}`
+	}
 
 	c.writeLineFmt(`func %[1]s(input string, startAt int) (int, bool) {
 	if startAt < 0 || startAt > len(input) {
@@ -114,13 +125,14 @@ func (c *converter) emitStringPrefixFilterForPrefix(rm *regexpData, prefix strin
 	if len(input)-startAt < %[2]d {
 		return 0, false
 	}
+%[4]s
 	offset := %[3]s
 	if offset < 0 {
 		return 0, false
 	}
 	return startAt + offset, true
 }
-`, name, rm.Tree.FindOptimizations.MinRequiredLength, indexExpr)
+`, name, rm.Tree.FindOptimizations.MinRequiredLength, indexExpr, runeErrorFallback)
 }
 
 func (c *converter) emitStringPrefixFilterForPrefixes(rm *regexpData, prefixes []string, ignoreCase bool) {
@@ -142,6 +154,18 @@ func (c *converter) emitStringPrefixFilterForPrefixes(rm *regexpData, prefixes [
 
 	name := fmt.Sprintf("%s_StringPrefixFilter", rm.GeneratedName)
 	rm.StringPrefixFilterName = name
+	runeErrorFallback := ""
+	for _, prefix := range prefixes {
+		if strings.ContainsRune(prefix, utf8.RuneError) {
+			runeErrorFallback = `
+	// Invalid UTF-8 bytes decode as U+FFFD, so let the rune matcher inspect
+	// the input instead of searching only for the valid UTF-8 encoding.
+	if !utf8.ValidString(input[startAt:]) {
+		return startAt, true
+	}`
+			break
+		}
+	}
 
 	c.writeLineFmt(`func %[1]s(input string, startAt int) (int, bool) {
 	if startAt < 0 || startAt > len(input) {
@@ -150,12 +174,13 @@ func (c *converter) emitStringPrefixFilterForPrefixes(rm *regexpData, prefixes [
 	if len(input)-startAt < %[2]d {
 		return 0, false
 	}
+%[4]s
 
 	best := -1
 	remaining := input[startAt:]
 	for _, prefix := range %[3]s {
 		var offset int
-`, name, rm.Tree.FindOptimizations.MinRequiredLength, prefixesName)
+`, name, rm.Tree.FindOptimizations.MinRequiredLength, prefixesName, runeErrorFallback)
 	if ignoreCase {
 		c.writeLine(`		offset = helpers.IndexStringIgnoreCaseASCII(remaining, prefix)`)
 	} else {
