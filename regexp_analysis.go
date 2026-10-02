@@ -72,7 +72,7 @@ func tryAnalyze(node *syntax.RegexNode, results *analysisResults, isAtomicByAnce
 	switch node.T {
 	case syntax.NtAtomic, syntax.NtNegLook, syntax.NtPosLook:
 		isAtomicBySelf = true
-	case syntax.NtCapture:
+	case syntax.NtCapture, syntax.NtResetCapture:
 		results.containsCapture[node] = struct{}{}
 	case syntax.NtLoop, syntax.NtLazyloop:
 		isInLoop = true

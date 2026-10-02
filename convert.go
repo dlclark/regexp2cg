@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/dlclark/regexp2/v2"
 	"github.com/dlclark/regexp2/v2/syntax"
@@ -503,9 +504,14 @@ func getGoLiteral(in any) string {
 	if isNilish(in) {
 		return "nil"
 	}
-	switch in.(type) {
+	switch ch := in.(type) {
 	case rune:
-		return fmt.Sprintf("%q", in)
+		// Quoting a surrogate replaces it with U+FFFD. The rune APIs can
+		// match these values, so preserve them as numeric constants.
+		if !utf8.ValidRune(ch) {
+			return fmt.Sprintf("%#x", ch)
+		}
+		return strconv.QuoteRune(ch)
 	}
 	return fmt.Sprintf("%#v", in)
 }
@@ -537,7 +543,7 @@ func getRuneLiteralParams(in []rune) string {
 	sep := ""
 	for _, ch := range in {
 		buf.WriteString(sep)
-		_, _ = fmt.Fprintf(buf, "%q", ch)
+		buf.WriteString(getGoLiteral(ch))
 		sep = ", "
 	}
 	return buf.String()
@@ -589,11 +595,11 @@ func (c *converter) emitIndexOfChars(chars []rune, negate bool, spanName string)
 
 	switch len(chars) {
 	case 1:
-		return fmt.Sprintf("helpers.%s1(%s, %q)", indexOfAnyName, spanName, chars[0])
+		return fmt.Sprintf("helpers.%s1(%s, %s)", indexOfAnyName, spanName, getGoLiteral(chars[0]))
 	case 2:
-		return fmt.Sprintf("helpers.%s2(%s, %q, %q)", indexOfAnyName, spanName, chars[0], chars[1])
+		return fmt.Sprintf("helpers.%s2(%s, %s, %s)", indexOfAnyName, spanName, getGoLiteral(chars[0]), getGoLiteral(chars[1]))
 	case 3:
-		return fmt.Sprintf("helpers.%s3(%s, %q, %q, %q)", indexOfAnyName, spanName, chars[0], chars[1], chars[2])
+		return fmt.Sprintf("helpers.%s3(%s, %s, %s, %s)", indexOfAnyName, spanName, getGoLiteral(chars[0]), getGoLiteral(chars[1]), getGoLiteral(chars[2]))
 	case 4, 5:
 		if shouldUseSearchValues(chars) {
 			return fmt.Sprintf("%s.%s(%s)", c.emitSearchValues(chars, ""), indexOfAnyName, spanName)

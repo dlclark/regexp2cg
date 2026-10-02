@@ -65,7 +65,7 @@ func (c *converter) emitFindFirstChar(rm *regexpData) {
 			if !rtl {
 				c.writeLine("if pos < len(r.Runtext) {")
 			} else {
-				c.writeLine("if pos > 1 {")
+				c.writeLine("if pos > 0 {")
 			}
 		} else {
 			c.writeLineFmt("// Any possible match is at least %v characters", minRequiredLength)
@@ -399,7 +399,7 @@ func computeMaxLength(node *syntax.RegexNode) int {
 		return sum
 	case syntax.NtAtomic, syntax.NtCapture:
 		return computeMaxLength(node.Children[0])
-	case syntax.NtEmpty, syntax.NtNothing, syntax.NtUpdateBumpalong,
+	case syntax.NtEmpty, syntax.NtResetCapture, syntax.NtNothing, syntax.NtUpdateBumpalong,
 		syntax.NtBeginning, syntax.NtBol, syntax.NtBoundary, syntax.NtECMABoundary,
 		syntax.NtEnd, syntax.NtEndZ, syntax.NtEol, syntax.NtNonboundary,
 		syntax.NtNonECMABoundary, syntax.NtStart, syntax.NtNegLook, syntax.NtPosLook:
@@ -625,15 +625,15 @@ func (c *converter) emitFixedSet_LeftToRight(rm *regexpData) {
 			// where we end up with a set of a single char, we can use IndexOf instead.
 			if primarySet.Range.First == primarySet.Range.Last {
 				if primarySet.Negated {
-					indexOf = fmt.Sprintf("helpers.IndexOfAnyExcept(%v, %q)", span, primarySet.Range.First)
+					indexOf = fmt.Sprintf("helpers.IndexOfAnyExcept(%v, %s)", span, getGoLiteral(primarySet.Range.First))
 				} else {
-					indexOf = fmt.Sprintf("helpers.IndexOfAny1(%v, %q)", span, primarySet.Range.First)
+					indexOf = fmt.Sprintf("helpers.IndexOfAny1(%v, %s)", span, getGoLiteral(primarySet.Range.First))
 				}
 			} else {
 				if primarySet.Negated {
-					indexOf = fmt.Sprintf("helpers.IndexOfAnyExceptInRange(%v, %q, %q)", span, primarySet.Range.First, primarySet.Range.Last)
+					indexOf = fmt.Sprintf("helpers.IndexOfAnyExceptInRange(%v, %s, %s)", span, getGoLiteral(primarySet.Range.First), getGoLiteral(primarySet.Range.Last))
 				} else {
-					indexOf = fmt.Sprintf("helpers.IndexOfAnyInRange(%v, %q, %q)", span, primarySet.Range.First, primarySet.Range.Last)
+					indexOf = fmt.Sprintf("helpers.IndexOfAnyInRange(%v, %s, %s)", span, getGoLiteral(primarySet.Range.First), getGoLiteral(primarySet.Range.Last))
 				}
 			}
 		} else if isSmall, setChars, negated, desc := primarySet.Set.IsUnicodeCategoryOfSmallCharCount(); isSmall {
@@ -742,13 +742,13 @@ func (c *converter) emitFixedSet_RightToLeft(rm *regexpData) {
 	// Find the next occurrence. If it can't be found, there's no match.`, set.Set.String())
 
 	if len(set.Chars) == 1 {
-		c.writeLineFmt(`pos = r.LastIndexOfRune(0, pos, %q)
+		c.writeLineFmt(`pos = r.LastIndexOfRune(0, pos, %s)
 		if pos >= 0 {
 			r.Runtextpos = pos + 1
 			return true
-		}`, set.Chars[0])
+		}`, getGoLiteral(set.Chars[0]))
 	} else {
-		c.writeLineFmt(`for pos--; pos < len(r.Runtext); pos-- {
+		c.writeLineFmt(`for pos--; pos >= 0; pos-- {
 			if %v {
 				r.Runtextpos = pos + 1
 				return true
@@ -935,7 +935,7 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 
 	if len(alt.Literal) > 0 {
 		literal := getRuneSliceLiteral(alt.Literal)
-		firstRune := fmt.Sprintf("%q", alt.Literal[0])
+		firstRune := getGoLiteral(alt.Literal[0])
 		if len(alt.Literal) == 1 {
 			fmt.Fprintf(buf, `%s	if i >= len(r.Runtext) || r.Runtext[i] != %s {
 %s		%s
@@ -1061,6 +1061,8 @@ func differByOneBit(a, b rune) (rune, bool) {
 func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet, negate bool, chExpr string) string {
 	//this is in-line and produces an expression that resolves to a bool,
 	//so anything that requires a new var must call a function
+	// Parenthesize compound expressions so callers can safely combine them
+	// with bounds checks using && or ||.
 
 	// We need to perform the equivalent of calling RegexRunner.CharInClass(ch, charClass),
 	// but that call is relatively expensive.  Before we fall back to it, we try to optimize
@@ -1165,14 +1167,14 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		if r.First == r.Last {
 			// single char
 			if negate {
-				return fmt.Sprintf("(%v != %q)", chExpr, r.First)
+				return fmt.Sprintf("(%v != %s)", chExpr, getGoLiteral(r.First))
 			}
-			return fmt.Sprintf("(%v == %q)", chExpr, r.First)
+			return fmt.Sprintf("(%v == %s)", chExpr, getGoLiteral(r.First))
 		}
 		if negate {
-			return fmt.Sprintf("!helpers.IsBetween(%s, %q, %q)", chExpr, r.First, r.Last)
+			return fmt.Sprintf("!helpers.IsBetween(%s, %s, %s)", chExpr, getGoLiteral(r.First), getGoLiteral(r.Last))
 		}
-		return fmt.Sprintf("helpers.IsBetween(%s, %q, %q)", chExpr, r.First, r.Last)
+		return fmt.Sprintf("helpers.IsBetween(%s, %s, %s)", chExpr, getGoLiteral(r.First), getGoLiteral(r.Last))
 	}
 
 	// Next, if the character class contains nothing but Unicode categories, we can call char.GetUnicodeCategory and
@@ -1211,9 +1213,9 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 			bitJoin = "&&"
 		}
 		if mask, ok := differByOneBit(setChars[0], setChars[1]); ok {
-			return fmt.Sprintf("(%s|0x%x %v %q)", chExpr, mask, eqStr, setChars[1]|mask)
+			return fmt.Sprintf("(%s|0x%x %v %s)", chExpr, mask, eqStr, getGoLiteral(setChars[1]|mask))
 		}
-		return fmt.Sprintf("(%s %s %q %s %[1]s %[2]s %[5]q)", chExpr, eqStr, setChars[0], bitJoin, setChars[1])
+		return fmt.Sprintf("(%s %s %s %s %[1]s %[2]s %[5]s)", chExpr, eqStr, getGoLiteral(setChars[0]), bitJoin, getGoLiteral(setChars[1]))
 	} else if len(setChars) == 3 {
 		negate = (negate != set.IsNegated())
 		eqStr := "=="
@@ -1223,9 +1225,9 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 			bitJoin = "&&"
 		}
 		if mask, ok := differByOneBit(setChars[0], setChars[1]); ok {
-			return fmt.Sprintf("((%s|0x%x %v %q) %s (%[1]s %[3]s %[6]q))", chExpr, mask, eqStr, setChars[1]|mask, bitJoin, setChars[2])
+			return fmt.Sprintf("((%s|0x%x %v %s) %s (%[1]s %[3]s %[6]s))", chExpr, mask, eqStr, getGoLiteral(setChars[1]|mask), bitJoin, getGoLiteral(setChars[2]))
 		}
-		return fmt.Sprintf("(%s %s %q %s %[1]s %[2]s %[5]q %[4]s %[1]s %[2]s %[6]q)", chExpr, eqStr, setChars[0], bitJoin, setChars[1], setChars[2])
+		return fmt.Sprintf("(%s %s %s %s %[1]s %[2]s %[5]s %[4]s %[1]s %[2]s %[6]s)", chExpr, eqStr, getGoLiteral(setChars[0]), bitJoin, getGoLiteral(setChars[1]), getGoLiteral(setChars[2]))
 	}
 
 	// Next, handle simple sets of two ASCII letter ranges that are cased versions of each other, e.g. [A-Za-z].
@@ -1243,7 +1245,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 			if negate {
 				op = ">"
 			}
-			return fmt.Sprintf("(uint(%s|0x20 - %q) %s uint(%q - %q))", chExpr, ranges[1].First, op, ranges[1].Last, ranges[1].First)
+			return fmt.Sprintf("(uint(%s|0x20 - %s) %s uint(%s - %s))", chExpr, getGoLiteral(ranges[1].First), op, getGoLiteral(ranges[1].Last), getGoLiteral(ranges[1].First))
 		}
 	}
 
@@ -1277,7 +1279,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		if negate {
 			negStr = "!"
 		}
-		return fmt.Sprintf("%shelpers.IsInMask32(%s-%q, 0x%x)", negStr, chExpr, analysis.LowerBoundInclusiveIfOnlyRanges, bitmap)
+		return fmt.Sprintf("%shelpers.IsInMask32(%s-%s, 0x%x)", negStr, chExpr, getGoLiteral(analysis.LowerBoundInclusiveIfOnlyRanges), bitmap)
 	}
 
 	// Next, handle sets where the high - low + 1 range is <= 64.  As with the 32-bit case above, we can emit
@@ -1310,7 +1312,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		if negate {
 			negStr = "!"
 		}
-		return fmt.Sprintf("%shelpers.IsInMask64(%s-%q, 0x%x)", negStr, chExpr, analysis.LowerBoundInclusiveIfOnlyRanges, bitmap)
+		return fmt.Sprintf("%shelpers.IsInMask64(%s-%s, 0x%x)", negStr, chExpr, getGoLiteral(analysis.LowerBoundInclusiveIfOnlyRanges), bitmap)
 	}
 
 	// All options after this point require a ch local.
@@ -1326,7 +1328,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 		if negate {
 			op = "&&"
 		}
-		return fmt.Sprintf("%s %s %s",
+		return fmt.Sprintf("(%s %s %s)",
 			getRangeCheckClause(chExpr, ranges[0], negate),
 			op,
 			getRangeCheckClause(chExpr, ranges[1], negate))
@@ -1365,7 +1367,7 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 	// String length is 8 chars == 16 bytes == 128 bits.
 	bitVector := make([]uint64, 2)
 
-	for i := rune(0); i < unicode.MaxASCII; i++ {
+	for i := rune(0); i <= unicode.MaxASCII; i++ {
 		if set.Contains(i) {
 			bitVector[i/64] |= (1 << (i % 64))
 		}
@@ -1406,17 +1408,18 @@ func (c *converter) emitMatchCharacterClass(rm *regexpData, set *syntax.CharSet,
 }
 
 func getRangeCheckClause(chExpr string, r syntax.SingleRange, negate bool) string {
-	if negate {
-		if r.First == r.Last {
-			return fmt.Sprintf("%s != %q", chExpr, r.First)
-		} else {
-			return fmt.Sprintf("%s - %q > %v", chExpr, r.First, r.Last-r.First)
-		}
-	}
 	if r.First == r.Last {
-		return fmt.Sprintf("%s == %q", chExpr, r.First)
+		op := "=="
+		if negate {
+			op = "!="
+		}
+		return fmt.Sprintf("%s %s %s", chExpr, op, getGoLiteral(r.First))
 	}
-	return fmt.Sprintf("%s - %q <= %v", chExpr, r.First, r.Last-r.First)
+	prefix := ""
+	if negate {
+		prefix = "!"
+	}
+	return fmt.Sprintf("%shelpers.IsBetween(%s, %s, %s)", prefix, chExpr, getGoLiteral(r.First), getGoLiteral(r.Last))
 }
 
 func (c *converter) emitIndexOfAnyCustomHelper(rm *regexpData, set *syntax.CharSet, negate bool, spanName string) string {
@@ -1431,17 +1434,17 @@ func (c *converter) emitIndexOfAnyCustomHelper(rm *regexpData, set *syntax.CharS
 func (c *converter) emitContainsNoAscii(negate bool, chExpr string, set *syntax.CharSet) string {
 	setField := c.emitSetDefinition(set)
 	if negate {
-		return fmt.Sprintf("%s < 128 || !%s.Contains(%[1]s)", chExpr, setField)
+		return fmt.Sprintf("(%s < 128 || !%s.Contains(%[1]s))", chExpr, setField)
 	}
-	return fmt.Sprintf("%s >= 128 && %s.Contains(%[1]s)", chExpr, setField)
+	return fmt.Sprintf("(%s >= 128 && %s.Contains(%[1]s))", chExpr, setField)
 }
 
 func (c *converter) emitAllAsciiContained(negate bool, chExpr string, set *syntax.CharSet) string {
 	setField := c.emitSetDefinition(set)
 	if negate {
-		return fmt.Sprintf("%s >= 128 && !%s.Contains(%[1]s)", chExpr, setField)
+		return fmt.Sprintf("(%s >= 128 && !%s.Contains(%[1]s))", chExpr, setField)
 	}
-	return fmt.Sprintf("%s < 128 || %s.Contains(%[1]s)", chExpr, setField)
+	return fmt.Sprintf("(%s < 128 || %s.Contains(%[1]s))", chExpr, setField)
 }
 
 func getUnicodeRangeTableNames(cats []syntax.Category) ([]string, bool) {

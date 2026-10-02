@@ -309,6 +309,10 @@ func (c *converter) emitExecuteNode(rm *regexpData, node *syntax.RegexNode, subs
 		c.emitExecuteCapture(rm, node, subsequent)
 		return
 
+	case syntax.NtResetCapture:
+		c.emitExecuteCaptureReset(rm, node)
+		return
+
 	case syntax.NtPosLook:
 		c.emitExecutePositiveLookaroundAssertion(rm, node)
 		return
@@ -542,9 +546,9 @@ func (c *converter) emitExecuteSingleChar(rm *regexpData, node *syntax.RegexNode
 	if node.IsSetFamily() {
 		expr = c.emitMatchCharacterClass(rm, node.Set, true, expr)
 	} else if node.IsOneFamily() {
-		expr = fmt.Sprintf("%s != %q", expr, node.Ch)
+		expr = fmt.Sprintf("%s != %s", expr, getGoLiteral(node.Ch))
 	} else {
-		expr = fmt.Sprintf("%s == %q", expr, node.Ch)
+		expr = fmt.Sprintf("%s == %s", expr, getGoLiteral(node.Ch))
 	}
 
 	if clauseOnly {
@@ -842,9 +846,9 @@ func (c *converter) emitExecuteSingleCharLazy(rm *regexpData, node *syntax.Regex
 				// string literal
 				overlap = (literal.String[0] == node.Ch)
 				if overlap {
-					c.writeLineFmt("%s = helpers.IndexOfAny1(%s, %q)", startingPos, rm.sliceSpan, node.Ch)
+					c.writeLineFmt("%s = helpers.IndexOfAny1(%s, %s)", startingPos, rm.sliceSpan, getGoLiteral(node.Ch))
 				} else {
-					c.writeLineFmt("%s = helpers.IndexOfAny2(%s, %q, %q)", startingPos, rm.sliceSpan, node.Ch, literal.String[0])
+					c.writeLineFmt("%s = helpers.IndexOfAny2(%s, %s, %s)", startingPos, rm.sliceSpan, getGoLiteral(node.Ch), getGoLiteral(literal.String[0]))
 				}
 			} else if len(literal.SetChars) > 0 {
 				// set literal
@@ -859,14 +863,14 @@ func (c *converter) emitExecuteSingleCharLazy(rm *regexpData, node *syntax.Regex
 				// single char from a RegexNode.One
 				overlap = (literal.Range.First == node.Ch)
 				if overlap {
-					c.writeLineFmt("%s = helpers.IndexOfAny1(%s, %q)", startingPos, rm.sliceSpan, node.Ch)
+					c.writeLineFmt("%s = helpers.IndexOfAny1(%s, %s)", startingPos, rm.sliceSpan, getGoLiteral(node.Ch))
 				} else {
-					c.writeLineFmt("%s = helpers.IndexOfAny2(%s, %q, %q)", startingPos, rm.sliceSpan, node.Ch, literal.Range.First)
+					c.writeLineFmt("%s = helpers.IndexOfAny2(%s, %s, %s)", startingPos, rm.sliceSpan, getGoLiteral(node.Ch), getGoLiteral(literal.Range.First))
 				}
 			} else {
 				// char range
 				overlap = true
-				c.writeLineFmt("%s = helpers.IndexOfAnyInRange(%s, %q, %q)", startingPos, rm.sliceSpan, literal.Range.First, literal.Range.Last)
+				c.writeLineFmt("%s = helpers.IndexOfAnyInRange(%s, %s, %s)", startingPos, rm.sliceSpan, getGoLiteral(literal.Range.First), getGoLiteral(literal.Range.Last))
 			}
 
 			// If the search didn't find anything, fail the match.  If it did find something, then we need to consider whether
@@ -879,7 +883,7 @@ func (c *converter) emitExecuteSingleCharLazy(rm *regexpData, node *syntax.Regex
 			if overlap {
 				c.writeLineFmt("if %s < 0 {", startingPos)
 			} else {
-				c.writeLineFmt("if %s >= len(%s) || %[2]s[%[1]s] == %[3]q {", startingPos, rm.sliceSpan, node.Ch)
+				c.writeLineFmt("if %s >= len(%s) || %[2]s[%[1]s] == %[3]s {", startingPos, rm.sliceSpan, getGoLiteral(node.Ch))
 			}
 			c.emitExecuteGoto(rm, rm.doneLabel)
 			c.writeLineFmt(`}
@@ -999,7 +1003,7 @@ func (c *converter) emitExecuteSingleCharAtomicLoop(rm *regexpData, node *syntax
 				if node.IsOneFamily() {
 					op = "=="
 				}
-				expr = fmt.Sprintf("%s %s %q", expr, op, node.Ch)
+				expr = fmt.Sprintf("%s %s %s", expr, op, getGoLiteral(node.Ch))
 			}
 
 			maxClause := ""
@@ -1053,7 +1057,7 @@ func (c *converter) emitExecuteSingleCharAtomicLoop(rm *regexpData, node *syntax
 			if node.IsOneFamily() {
 				op = "=="
 			}
-			expr = fmt.Sprintf("%s %s %q", expr, op, node.Ch)
+			expr = fmt.Sprintf("%s %s %s", expr, op, getGoLiteral(node.Ch))
 		}
 
 		if minIterations != 0 || maxIterations != math.MaxInt32 {
@@ -1216,7 +1220,7 @@ func (c *converter) emitExecuteAtomicSingleCharZeroOrOne(rm *regexpData, node *s
 		if node.IsOneFamily() {
 			op = "=="
 		}
-		expr = fmt.Sprintf("%s %s %q", expr, op, node.Ch)
+		expr = fmt.Sprintf("%s %s %s", expr, op, getGoLiteral(node.Ch))
 	}
 
 	var spaceAvailable string
@@ -1259,9 +1263,9 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 	if node.IsOneFamily() {
 		var expr string
 		if negate {
-			expr = fmt.Sprintf("helpers.%sIndexOfAnyExcept1(%s, %q)", last, spanName, node.Ch)
+			expr = fmt.Sprintf("helpers.%sIndexOfAnyExcept1(%s, %s)", last, spanName, getGoLiteral(node.Ch))
 		} else {
-			expr = fmt.Sprintf("helpers.%sIndexOfAny1(%s, %q)", last, spanName, node.Ch)
+			expr = fmt.Sprintf("helpers.%sIndexOfAny1(%s, %s)", last, spanName, getGoLiteral(node.Ch))
 		}
 		*indexOfExpr = expr
 		*literalLength = 1
@@ -1271,9 +1275,9 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 	if node.IsNotoneFamily() {
 		var expr string
 		if negate {
-			expr = fmt.Sprintf("helpers.%sIndexOfAny1(%s, %q)", last, spanName, node.Ch)
+			expr = fmt.Sprintf("helpers.%sIndexOfAny1(%s, %s)", last, spanName, getGoLiteral(node.Ch))
 		} else {
-			expr = fmt.Sprintf("helpers.%sIndexOfAnyExcept1(%s, %q)", last, spanName, node.Ch)
+			expr = fmt.Sprintf("helpers.%sIndexOfAnyExcept1(%s, %s)", last, spanName, getGoLiteral(node.Ch))
 		}
 		*indexOfExpr = expr
 		*literalLength = 1
@@ -1287,9 +1291,9 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 		if rs := node.Set.GetIfNRanges(1); len(rs) == 1 && rs[0].Last-rs[0].First > 1 {
 			var expr string
 			if negate {
-				expr = fmt.Sprintf("helpers.%sIndexOfAnyExceptInRange(%s, %q, %q)", last, spanName, rs[0].First, rs[0].Last)
+				expr = fmt.Sprintf("helpers.%sIndexOfAnyExceptInRange(%s, %s, %s)", last, spanName, getGoLiteral(rs[0].First), getGoLiteral(rs[0].Last))
 			} else {
-				expr = fmt.Sprintf("helpers.%sIndexOfAnyInRange(%s, %q, %q)", last, spanName, rs[0].First, rs[0].Last)
+				expr = fmt.Sprintf("helpers.%sIndexOfAnyInRange(%s, %s, %s)", last, spanName, getGoLiteral(rs[0].First), getGoLiteral(rs[0].Last))
 			}
 			*indexOfExpr = expr
 			*literalLength = 1
@@ -1532,9 +1536,19 @@ func (c *converter) emitExecuteLoop(rm *regexpData, node *syntax.RegexNode) {
 	c.writeLine("")
 	c.transferSliceStaticPosToPos(rm, false) // ensure sliceStaticPos remains 0
 	childBacktracks := rm.doneLabel != iterationFailedLabel
+	if iterationMayBeEmpty && hasECMADuplicateNames(rm.Tree) {
+		c.emitECMAEmptyIterationCheck(rm, iterationCount, startingPos, minIterations)
+	}
+	requiredIteration := countIsLessThan(iterationCount, minIterations)
+	if hasECMADuplicateNames(rm.Tree) {
+		// RepeatMatcher step 2.2 permits the last required empty iteration
+		// and another attempt, whose result must consume input.
+		requiredIteration = fmt.Sprintf("%s <= %d", iterationCount, minIterations)
+	}
 
-	// Loop condition.  Continue iterating greedily if we've not yet reached the maximum.  We also need to stop
-	// iterating if the iteration matched empty and we already hit the minimum number of iterations.
+	// Continue within the maximum count. For duplicate-name patterns, a
+	// required empty iteration may be followed by another attempt;
+	// RepeatMatcher step 2.2 rejects it only if it also matches empty.
 	c.writeLine("")
 	if maxIterations == math.MaxInt32 && !iterationMayBeEmpty {
 		// The loop has no upper bound and iterations can't be empty; this is a greedy loop, so regardless of whether
@@ -1554,13 +1568,13 @@ func (c *converter) emitExecuteLoop(rm *regexpData, node *syntax.RegexNode) {
 			c.writeLineFmt(`// The loop has a lower bound of %v but no upper bound. Continue iterating greedily
 						// if the last iteration wasn't empty (or if it was, if the lower bound hasn't yet been reached).
 						if pos != %s || %s {
-						`, minIterations, startingPos, countIsLessThan(iterationCount, minIterations))
+						`, minIterations, startingPos, requiredIteration)
 		} else if minIterations > 0 {
 			// Iterations may be empty and there's both a lower and upper bound on the loop.
 			c.writeLineFmt(`// The loop has a lower bound of %v and an upper bound of %v. Continue iterating
 						// greedily if the upper bound hasn't yet been reached and either the last iteration was non-empty or the
 						// lower bound hasn't yet been reached.
-						if (pos != %s || %s) && %s {`, minIterations, maxIterations, startingPos, countIsLessThan(iterationCount, minIterations), countIsLessThan(iterationCount, maxIterations))
+						if (pos != %s || %s) && %s {`, minIterations, maxIterations, startingPos, requiredIteration, countIsLessThan(iterationCount, maxIterations))
 		} else if maxIterations == math.MaxInt32 {
 			// Iterations may be empty and there's no lower or upper bound.
 			c.writeLineFmt(`// The loop is unbounded. Continue iterating greedily as long as the last iteration wasn't empty.
@@ -1850,6 +1864,9 @@ func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 	c.emitExecuteNode(rm, child, nil, true)
 	c.writeLine("")
 	c.transferSliceStaticPosToPos(rm, false) // ensure sliceStaticPos remains 0
+	if iterationMayBeEmpty && hasECMADuplicateNames(rm.Tree) {
+		c.emitECMAEmptyIterationCheck(rm, iterationCount, startingPos, minIterations)
+	}
 	if rm.doneLabel == iterationFailedLabel {
 		rm.doneLabel = originalDoneLabel
 	}
@@ -1864,7 +1881,7 @@ func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 		c.writeLine("}")
 	}
 
-	if iterationMayBeEmpty {
+	if iterationMayBeEmpty && !hasECMADuplicateNames(rm.Tree) {
 		// If the last iteration was empty, we need to prevent further iteration from this point
 		// unless we backtrack out of this iteration.
 		c.writeLineFmt(`// If the iteration successfully matched zero-length input, record that an empty iteration was seen.
@@ -1895,7 +1912,7 @@ func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 		}
 		args := []string{"pos"}
 		if iterationMayBeEmpty {
-			args = append(args, sawEmpty, startingPos)
+			args = []string{sawEmpty, startingPos, "pos"}
 		}
 
 		c.emitStackPop(stackCookie, args...)
@@ -2151,7 +2168,7 @@ func (c *converter) emitExecuteAlternation(rm *regexpData, node *syntax.RegexNod
 				setChars := startingLiteralNode.Set.GetSetChars(SetCharsSize)
 				c.writeLineFmt("case %s:", getRuneLiteralParams(setChars))
 			} else {
-				c.writeLineFmt("case %q:", startingLiteralNode.FirstCharOfOneOrMulti())
+				c.writeLineFmt("case %s:", getGoLiteral(startingLiteralNode.FirstCharOfOneOrMulti()))
 			}
 
 			// Emit the code for the branch, without the first character that was already matched in the switch.
@@ -2408,7 +2425,7 @@ func (c *converter) emitExecuteBackreference(rm *regexpData, node *syntax.RegexN
 	}
 
 	// If the specified capture hasn't yet captured anything, fail to match... except when using RegexOptions.ECMAScript,
-	// in which case per ECMA 262 section 21.2.2.9 the backreference should succeed.
+	// in which case ECMAScript 2025 §22.2.2.7.2 BackreferenceMatcher, step 1.7, consumes no input.
 	if (node.Options & syntax.ECMAScript) != 0 {
 		c.writeLineFmt(`// If the %s hasn't matched, the backreference matches with RegexOptions.ECMAScript rules.
 					if r.IsMatched(%v) {`, describeCapture(rm, node.M), capnum)
@@ -2758,6 +2775,21 @@ func (c *converter) emitExecuteExpressionConditional(rm *regexpData, node *synta
 	}
 }
 
+// Implements ECMAScript 2025 §22.2.2.3.1 RepeatMatcher, step 4. Resets mutate
+// capture state without observing it; quick matching retains only referenced
+// slots. Enclosing scopes restore the crawl state on failure.
+// https://tc39.es/ecma262/2025/multipage/text-processing.html#sec-repeatmatcher
+func (c *converter) emitExecuteCaptureReset(rm *regexpData, node *syntax.RegexNode) {
+	capnum := mapCaptureNumber(node.M, rm.Tree.Caps)
+	if rm.quickMode && !rm.QuickCaptureSlots[capnum] {
+		return
+	}
+	c.transferSliceStaticPosToPos(rm, false)
+	c.writeLineFmt("if r.IsMatched(%v) {", capnum)
+	c.writeLineFmt("r.TransferCapture(-1, %v, pos, pos)", capnum)
+	c.writeLine("}")
+}
+
 func mapCaptureNumber(capNum int, caps map[int]int) int {
 	if capNum == -1 {
 		return -1
@@ -2787,7 +2819,7 @@ func (c *converter) emitExecuteCapture(rm *regexpData, node *syntax.RegexNode, s
 	child := node.Children[0]
 
 	if uncapnum != -1 {
-		c.writeLineFmt("if r.IsMatched(%v) {", uncapnum)
+		c.writeLineFmt("if !r.IsMatched(%v) {", uncapnum)
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}\n")
 	}
@@ -3222,6 +3254,8 @@ func describeNode(rm *regexpData, node *syntax.RegexNode) string {
 		return "Match a sequence of expressions."
 	case syntax.NtECMABoundary:
 		return `Match if at a word boundary (according to ECMAScript rules).`
+	case syntax.NtResetCapture:
+		return fmt.Sprintf("Reset the %s before the next iteration.", describeCapture(rm, node.M))
 	case syntax.NtEmpty:
 		return `Match an empty string.`
 	case syntax.NtEnd:
@@ -3390,4 +3424,30 @@ func describeLoop(rm *regexpData, node *syntax.RegexNode) string {
 	}
 
 	return style + bounds
+}
+
+func hasECMADuplicateNames(tree *syntax.RegexTree) bool {
+	if tree.Options&syntax.ECMAScript == 0 {
+		return false
+	}
+	for slot, name := range tree.Caplist {
+		number := slot
+		if tree.Capnumlist != nil {
+			number = tree.Capnumlist[slot]
+		}
+		if name != "" && tree.Capnames[name] != number {
+			return true
+		}
+	}
+	return false
+}
+
+// ECMAScript 2025 §22.2.2.3.1 RepeatMatcher, step 2.2, rejects an empty
+// iteration when no required repetitions remain, for greedy and lazy loops.
+// https://tc39.es/ecma262/2025/multipage/text-processing.html#sec-repeatmatcher
+func (c *converter) emitECMAEmptyIterationCheck(rm *regexpData, iterationCount, startingPos string, minIterations int) {
+	c.writeLine("// ECMAScript 2025 RepeatMatcher (§22.2.2.3.1, step 2.2) rejects optional empty iterations.")
+	c.writeLineFmt("if pos == %s && %s > %d {", startingPos, iterationCount, minIterations)
+	c.emitExecuteGoto(rm, rm.doneLabel)
+	c.writeLine("}")
 }
