@@ -62,6 +62,37 @@ func TestIgnoreCaseAlternationMatchesWholeBranch(t *testing.T) {
 	runMatch(t, pattern, exec, "'RE", " 0: 'RE")
 }
 
+func TestGeneratedAlternationWithNegatedPrefix(t *testing.T) {
+	// regexp2 issue #119: the starting-character search must retain the
+	// literal branch when another branch starts with a negated character.
+	for _, tc := range []struct {
+		pattern, input, match string
+		noMatch               string
+	}{
+		{`a.|.b`, "ac", "ac", "a\n"},
+		{`a.|.b`, "cb", "cb", "\nb"},
+		{`a.|.b`, "界aé", `a\xc3\xa9`, ""},
+		{`.b|a.`, "ac", "ac", ""},
+		{`a[^x]|[^x]b`, "ab", "ab", "xb"},
+		{`x[^x]|[^x]b`, "xb", "xb", "xx"},
+		{`\d.|.b`, "1c", "1c", ""},
+		{`a[^\x00]|[^\x00]b`, "ab", "ab", `\x00b`},
+		{`a[^\x{10fffe}]|[^\x{10fffe}]b`, "a\U0010ffff", `a\xf4\x8f\xbf\xbf`, ""},
+		{`a[^\x{10ffff}]|[^\x{10ffff}]b`, "ab", "ab", "\U0010ffffb"},
+		{`a.|.+b`, "ac", "ac", ""},
+		{`a.|.+?b`, "ac", "ac", ""},
+		{`a.|(?>.+)b`, "ac", "ac", ""},
+	} {
+		t.Run(tc.pattern+"/"+tc.input, func(t *testing.T) {
+			exec := generateAndCompile(t, tc.pattern, 0)
+			runMatch(t, tc.pattern, exec, tc.input, " 0: "+tc.match)
+			if tc.noMatch != "" {
+				runNoMatch(t, tc.pattern, exec, tc.noMatch)
+			}
+		})
+	}
+}
+
 func TestGeneratedSyntaxExtensions(t *testing.T) {
 	tests := []struct {
 		name    string
