@@ -32,7 +32,7 @@ func TestGeneratedECMAUnicode(t *testing.T) {
 		t.Fatalf("generate ECMAScript engines: %v\n%s", err, out)
 	}
 	// Run each regression separately so a panic does not mask other failures.
-	for _, name := range []string{"TestPropertyLoopBounds", "TestPropertyRangeBounds", "TestPropertyASCIIBoundary", "TestSurrogateProperty", "TestPropertyComposition", "TestEscapedGroupNames", "TestLegacyECMALookaheadQuantifier", "TestDuplicateNamesBoolean"} {
+	for _, name := range []string{"TestPropertyLoopBounds", "TestPropertyRangeBounds", "TestPropertyASCIIBoundary", "TestSurrogateProperty", "TestPropertyComposition", "TestEscapedGroupNames", "TestLegacyECMALookaheadQuantifier", "TestDuplicateNamesBoolean", "TestQuantifiedCaptures"} {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command("go", "test", "-run", "^"+name+"$", ".")
 			cmd.Dir = dir

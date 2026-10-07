@@ -2,10 +2,74 @@ package ecmaharness
 
 import (
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dlclark/regexp2/v2"
 )
+
+func TestQuantifiedCaptures(t *testing.T) {
+	// ECMAScript RepeatMatcher clears captures before each repetition and
+	// rejects optional empty iterations. Check both full and quick executors.
+	for _, tc := range []struct {
+		name  string
+		re    *regexp2.Regexp
+		input string
+		// nil means no match; each group lists its complete capture history.
+		captures [][]string
+	}{
+		{"cleared backreference", regexp2.MustCompile(`^(a(b)?)+\2$`, regexp2.ECMAScript|regexp2.Unicode), "aba", [][]string{{"aba"}, {"a"}, nil}},
+		{"stale backreference rejected", regexp2.MustCompile(`^(a(b)?)+\2$`, regexp2.ECMAScript|regexp2.Unicode), "abab", nil},
+		{"optional capture", regexp2.MustCompile(`^(a(b)?)+$`, regexp2.ECMAScript), "aba", [][]string{{"aba"}, {"a"}, nil}},
+		{"backtracking restores captures", regexp2.MustCompile(`^(a(b)?)+a\2$`, regexp2.ECMAScript), "abab", [][]string{{"abab"}, {"ab"}, {"b"}}},
+		{"lookahead restores captures", regexp2.MustCompile(`^(?:(?=(a(b)?))\1)+a\2$`, regexp2.ECMAScript), "abab", [][]string{{"abab"}, {"ab"}, {"b"}}},
+		{"atomic group restores captures", regexp2.MustCompile(`^(?:(?>(a(b)?))|c)+a\2$`, regexp2.ECMAScript), "abab", [][]string{{"abab"}, {"ab"}, {"b"}}},
+		{"greedy empty iteration rejected", regexp2.MustCompile(`^(a?)*$`, regexp2.ECMAScript), "a", [][]string{{"a"}, {"a"}}},
+		{"zero repetitions", regexp2.MustCompile(`^(a?)*$`, regexp2.ECMAScript), "", [][]string{{""}, nil}},
+		{"lazy empty iteration rejected", regexp2.MustCompile(`^(a?)+?$`, regexp2.ECMAScript), "a", [][]string{{"a"}, {"a"}}},
+		{"lazy empty iteration failure", regexp2.MustCompile(`^(a?)*?\1$`, regexp2.ECMAScript), "a", nil},
+		{"greedy retries after required empty", regexp2.MustCompile(`^(a??)+\1$`, regexp2.ECMAScript), "aa", [][]string{{"aa"}, {"a"}}},
+		{"lazy retries after required empty", regexp2.MustCompile(`^(a??)+?\1$`, regexp2.ECMAScript), "aa", [][]string{{"aa"}, {"a"}}},
+		{"required empty repetition", regexp2.MustCompile(`^(a?)+?$`, regexp2.ECMAScript), "", [][]string{{""}, {""}}},
+		{"bounded required empty repetition", regexp2.MustCompile(`^(a?){2,3}$`, regexp2.ECMAScript), "a", [][]string{{"a"}, {""}}},
+		{"single named capture", regexp2.MustCompile(`^(?:(?<x>a)|b)+$`, regexp2.ECMAScript), "ab", [][]string{{"ab"}, nil}},
+		{"nullable branch retries", regexp2.MustCompile(`^(a?b??)*$`, regexp2.ECMAScript), "ab", [][]string{{"ab"}, {"b"}}},
+		{"optional lookahead rejected", regexp2.MustCompile(`(?:(?=(abc)))?a`, regexp2.ECMAScript), "abc", [][]string{{"a"}, nil}},
+		{"non-ECMA capture history", regexp2.MustCompile(`^(a(b)?)+$`), "aba", [][]string{{"aba"}, {"ab", "a"}, {"b"}}},
+		{"non-ECMA backreference", regexp2.MustCompile(`^(a(b)?)+\2$`), "abab", [][]string{{"abab"}, {"ab", "a"}, {"b"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.re.MatchTimeout = time.Second
+			checkMatch(t, tc.re, []rune(tc.input), tc.captures != nil)
+			m, err := tc.re.FindStringMatch(tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.captures == nil {
+				return // checkMatch already verified that there is no match.
+			}
+			if m == nil {
+				t.Fatal("expected match")
+			}
+			groups := m.Groups()
+			if len(groups) != len(tc.captures) {
+				t.Fatalf("got %d groups, want %d", len(groups), len(tc.captures))
+			}
+			for i, want := range tc.captures {
+				got := groups[i].Captures
+				if len(got) != len(want) {
+					t.Errorf("group %d has %d captures, want %v", i, len(got), want)
+					continue
+				}
+				for j, capture := range got {
+					if capture.String() != want[j] {
+						t.Errorf("group %d capture %d = %q, want %q", i, j, capture.String(), want[j])
+					}
+				}
+			}
+		})
+	}
+}
 
 // Calls remain inside tests so they run after the generated engines register.
 func TestPropertyLoopBounds(t *testing.T) {

@@ -1536,17 +1536,17 @@ func (c *converter) emitExecuteLoop(rm *regexpData, node *syntax.RegexNode) {
 	c.writeLine("")
 	c.transferSliceStaticPosToPos(rm, false) // ensure sliceStaticPos remains 0
 	childBacktracks := rm.doneLabel != iterationFailedLabel
-	if iterationMayBeEmpty && hasECMADuplicateNames(rm.Tree) {
+	if iterationMayBeEmpty && rm.Options&syntax.ECMAScript != 0 {
 		c.emitECMAEmptyIterationCheck(rm, iterationCount, startingPos, minIterations)
 	}
 	requiredIteration := countIsLessThan(iterationCount, minIterations)
-	if hasECMADuplicateNames(rm.Tree) {
+	if rm.Options&syntax.ECMAScript != 0 {
 		// RepeatMatcher step 2.2 permits the last required empty iteration
 		// and another attempt, whose result must consume input.
 		requiredIteration = fmt.Sprintf("%s <= %d", iterationCount, minIterations)
 	}
 
-	// Continue within the maximum count. For duplicate-name patterns, a
+	// Continue within the maximum count. For ECMAScript patterns, a
 	// required empty iteration may be followed by another attempt;
 	// RepeatMatcher step 2.2 rejects it only if it also matches empty.
 	c.writeLine("")
@@ -1864,7 +1864,7 @@ func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 	c.emitExecuteNode(rm, child, nil, true)
 	c.writeLine("")
 	c.transferSliceStaticPosToPos(rm, false) // ensure sliceStaticPos remains 0
-	if iterationMayBeEmpty && hasECMADuplicateNames(rm.Tree) {
+	if iterationMayBeEmpty && rm.Options&syntax.ECMAScript != 0 {
 		c.emitECMAEmptyIterationCheck(rm, iterationCount, startingPos, minIterations)
 	}
 	if rm.doneLabel == iterationFailedLabel {
@@ -1881,7 +1881,7 @@ func (c *converter) emitExecuteLazy(rm *regexpData, node *syntax.RegexNode) {
 		c.writeLine("}")
 	}
 
-	if iterationMayBeEmpty && !hasECMADuplicateNames(rm.Tree) {
+	if iterationMayBeEmpty && rm.Options&syntax.ECMAScript == 0 {
 		// If the last iteration was empty, we need to prevent further iteration from this point
 		// unless we backtrack out of this iteration.
 		c.writeLineFmt(`// If the iteration successfully matched zero-length input, record that an empty iteration was seen.
@@ -3424,22 +3424,6 @@ func describeLoop(rm *regexpData, node *syntax.RegexNode) string {
 	}
 
 	return style + bounds
-}
-
-func hasECMADuplicateNames(tree *syntax.RegexTree) bool {
-	if tree.Options&syntax.ECMAScript == 0 {
-		return false
-	}
-	for slot, name := range tree.Caplist {
-		number := slot
-		if tree.Capnumlist != nil {
-			number = tree.Capnumlist[slot]
-		}
-		if name != "" && tree.Capnames[name] != number {
-			return true
-		}
-	}
-	return false
 }
 
 // ECMAScript 2025 §22.2.2.3.1 RepeatMatcher, step 2.2, rejects an empty
