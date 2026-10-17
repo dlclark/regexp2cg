@@ -902,7 +902,7 @@ func (c *converter) emitRequiredLandmarkSearchOptimized(landmark syntax.Required
 %sfor i := %s; i < len(r.Runtext); i++ {
 `, indent, landmarkIndex, indent, searchStart)
 	for altIndex, alt := range landmark.Alternatives {
-		buf.WriteString(c.emitRequiredLandmarkAlternativeSearchOptimized(alt, landmarkIndex, altIndex, len(landmark.Alternatives), successLabel, indent+"\t"))
+		buf.WriteString(c.emitRequiredLandmarkAlternativeSearchOptimized(alt, landmark, landmarkIndex, altIndex, successLabel, indent+"\t"))
 	}
 	fmt.Fprintf(buf, `%s}
 %s	goto %s
@@ -911,14 +911,14 @@ func (c *converter) emitRequiredLandmarkSearchOptimized(landmark syntax.Required
 	return buf.String()
 }
 
-func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.RequiredLandmarkAlternative, landmarkIndex, altIndex, altCount int, successLabel, indent string) string {
+func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.RequiredLandmarkAlternative, landmark syntax.RequiredLandmark, landmarkIndex, altIndex int, successLabel, indent string) string {
 	buf := &bytes.Buffer{}
 	if altIndex > 0 {
 		fmt.Fprintf(buf, `%sLandmark%dAlt%d:
 `, indent, landmarkIndex, altIndex)
 	}
 	failureJump := "continue"
-	if altIndex+1 < altCount {
+	if altIndex+1 < len(landmark.Alternatives) {
 		failureJump = fmt.Sprintf("goto Landmark%dAlt%d", landmarkIndex, altIndex+1)
 	}
 	fmt.Fprintf(buf, `%s// Landmark %d, alternative %d: %s.
@@ -962,7 +962,15 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 %s	if end-i < %d {
 %s		%s
 %s	}
-`, indent, indent, maxRepeat, set, indent, indent, indent, alt.MinRepeat, indent, failureJump, indent)
+`, indent, indent, alt.MinRepeat, set, indent, indent, indent, alt.MinRepeat, indent, failureJump, indent)
+		// Stop at the shortest core that allows the required whitespace.
+		// Execution may backtrack a longer set run to this endpoint.
+		if alt.RequireWhitespaceAfter {
+			fmt.Fprintf(buf, `%s	for end < len(r.Runtext) && end-i < %d && !%s.Contains(r.Runtext[end]) && %s.Contains(r.Runtext[end]) {
+%s		end++
+%s	}
+`, indent, maxRepeat, c.emitSetDefinition(alt.TrailingWhitespaceSet), set, indent, indent)
+		}
 	}
 
 	if alt.RequireWhitespaceAfter {
@@ -973,25 +981,54 @@ func (c *converter) emitRequiredLandmarkAlternativeSearchOptimized(alt syntax.Re
 `, indent, whitespaceSet, indent, failureJump, indent)
 	}
 
-	if alt.LeadingWhitespaceSet == nil {
-		fmt.Fprintf(buf, `%s	landmarkStart = i
-%s	landmarkCoreStart = i
-%s	landmarkEnd = end
-%s	goto %s
-%s}
-`, indent, indent, indent, indent, successLabel, indent)
-	} else {
-		fmt.Fprintf(buf, `%s	matchStart := i
-%s	for matchStart > 0 && %s.Contains(r.Runtext[matchStart-1]) {
-%s		matchStart--
+	// Another alternative can end earlier, even if its core starts later.
+	// Bound the end using its minimum core length and possible first rune.
+	// Ignoring its remaining checks is conservative: Execute verifies them.
+	for j, other := range landmark.Alternatives {
+		if j == altIndex {
+			continue
+		}
+		minLength := other.MinRepeat
+		var startsWith string
+		if len(other.Literal) > 0 {
+			minLength = len(other.Literal)
+			startsWith = "r.Runtext[otherStart] == " + getGoLiteral(other.Literal[0])
+		} else {
+			startsWith = c.emitSetDefinition(other.Set) + ".Contains(r.Runtext[otherStart])"
+		}
+		// Subtract before comparing to avoid overflowing with large repeats.
+		fmt.Fprintf(buf, `%s	for otherStart := i; %d < end-otherStart; otherStart++ {
+%s		if %s {
+%s			end = otherStart + %d
+%s			break
+%s		}
 %s	}
-%s	landmarkStart = matchStart
-%s	landmarkCoreStart = i
+`, indent, minLength, indent, startsWith, indent, minLength, indent, indent, indent)
+	}
+	fmt.Fprintf(buf, "%s\tlandmarkStart = i\n", indent)
+	if landmarkIndex == 0 {
+		// Recover starts allowed by every alternative, including alternatives
+		// whose core follows this one through leading whitespace. Execute
+		// checks the core and any intervening anchors at the candidate start.
+		for _, other := range landmark.Alternatives {
+			if other.LeadingWhitespaceSet == nil {
+				continue
+			}
+			fmt.Fprintf(buf, `%s	{
+%s		matchStart := i
+%s		for matchStart > pos && %s.Contains(r.Runtext[matchStart-1]) {
+%s			matchStart--
+%s		}
+%s		landmarkStart = min(landmarkStart, matchStart)
+%s	}
+`, indent, indent, indent, c.emitSetDefinition(other.LeadingWhitespaceSet), indent, indent, indent, indent)
+		}
+	}
+	fmt.Fprintf(buf, `%s	landmarkCoreStart = i
 %s	landmarkEnd = end
 %s	goto %s
 %s}
-`, indent, indent, c.emitSetDefinition(alt.LeadingWhitespaceSet), indent, indent, indent, indent, indent, indent, successLabel, indent)
-	}
+`, indent, indent, indent, successLabel, indent)
 	return buf.String()
 }
 

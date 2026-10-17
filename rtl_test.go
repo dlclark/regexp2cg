@@ -27,3 +27,18 @@ func TestRightToLeft_StartAt(t *testing.T) {
 
 	runMatch(t, pattern, exec, "0123", " 0: 3")
 }
+
+func TestGeneratedLookbehindPreservesBacktracking(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, input string
+	}{
+		{`(?<=(?:a*(ba)){2})$`, "baba"},
+		{`(?<=(?:a*\z){2})$`, "a"},
+		{`(?<=aba*)`, "ab"},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			binary := generateAndCompile(t, tc.pattern, 0)
+			runMatch(t, tc.pattern, binary, tc.input, " 0: ")
+		})
+	}
+}

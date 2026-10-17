@@ -98,6 +98,13 @@ func tryAnalyze(node *syntax.RegexNode, results *analysisResults, isAtomicByAnce
 			treatChildAsAtomic = false
 		}
 
+		// ECMAScript rejects an optional empty iteration. Even an atomic
+		// optional must let its body backtrack to a consuming alternative.
+		if (node.T == syntax.NtLoop || node.T == syntax.NtLazyloop) &&
+			node.Options&syntax.ECMAScript != 0 && node.M == 0 && node.N == 1 && child.ComputeMinLength() == 0 {
+			treatChildAsAtomic = false
+		}
+
 		//analyze the child
 		if !tryAnalyze(child, results, treatChildAsAtomic, isInLoop) {
 			return false

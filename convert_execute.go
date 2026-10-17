@@ -1302,7 +1302,22 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 
 		setChars := node.Set.GetSetChars(128)
 		if len(setChars) > 0 {
-			expr := c.emitIndexOfChars(setChars, negate, spanName)
+			var expr string
+			if useLast {
+				// Greedy backtracking must try the last possible successor first.
+				// The small-set IndexOf helpers only search forwards.
+				method := "LastIndexOfAny"
+				if negate {
+					method += "Except"
+				}
+				if len(setChars) == 1 {
+					expr = fmt.Sprintf("helpers.%s1(%s, %s)", method, spanName, getGoLiteral(setChars[0]))
+				} else {
+					expr = fmt.Sprintf("%s.%s(%s)", c.emitSearchValues(setChars, ""), method, spanName)
+				}
+			} else {
+				expr = c.emitIndexOfChars(setChars, negate, spanName)
+			}
 			*indexOfExpr = expr
 			*literalLength = 1
 			return true

@@ -129,3 +129,62 @@ func TestGeneratedECMADuplicateNamesEmptyIterationFailure(t *testing.T) {
 	binary := generateAndCompile(t, pattern, syntax.ECMAScript)
 	runNoMatch(t, pattern, binary, "b")
 }
+
+func TestGeneratedECMAOptionalEmptyAlternatives(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, input string
+		groups         []string
+	}{
+		{`((?=a)|a)?`, "a", []string{"a", "a"}},
+		{`((a??))?`, "a", []string{"a", "a", "a"}},
+		{`(?<=(a*|b)?)a`, "ba", []string{"a", "b"}},
+		{`((?=a)|a)?`, "b", []string{"", "<unset>"}},
+		{`((?=a)|a){1}`, "a", []string{"", ""}},
+		{`((?=a)|a)??`, "a", []string{"", "<unset>"}},
+	} {
+		t.Run(tc.pattern+"/"+tc.input, func(t *testing.T) {
+			binary := generateAndCompile(t, tc.pattern, syntax.ECMAScript)
+			for i, group := range tc.groups {
+				runMatch(t, tc.pattern, binary, tc.input, fmt.Sprintf("%2d: %s", i, group))
+			}
+		})
+	}
+}
+
+func TestGeneratedECMAIdentityAndControlEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, input, want, noMatch string
+	}{
+		{`^\A\a\e\G\Z\z$`, "AaeGZz", "AaeGZz", ""},
+		{`^[\p-z]$`, "q", "q", "-"},
+		{`^[\c_]$`, "\x1f", `\x1f`, "_"},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			binary := generateAndCompile(t, tc.pattern, syntax.ECMAScript)
+			runMatch(t, tc.pattern, binary, tc.input, " 0: "+tc.want)
+			runNoMatch(t, tc.pattern, binary, tc.noMatch)
+		})
+	}
+}
+
+func TestGeneratedECMADotLineTerminators(t *testing.T) {
+	for _, options := range []syntax.RegexOptions{
+		syntax.ECMAScript,
+		syntax.ECMAScript | syntax.Unicode,
+		syntax.ECMAScript | syntax.Multiline,
+		syntax.ECMAScript | syntax.Singleline,
+	} {
+		t.Run(fmt.Sprint(options), func(t *testing.T) {
+			pattern := `^.$`
+			binary := generateAndCompile(t, pattern, options)
+			runMatch(t, pattern, binary, "\u2027", ` 0: \xe2\x80\xa7`)
+			if options&syntax.Singleline != 0 {
+				runMatch(t, pattern, binary, "\u2028", ` 0: \xe2\x80\xa8`)
+				runMatch(t, pattern, binary, "\u2029", ` 0: \xe2\x80\xa9`)
+			} else {
+				runNoMatch(t, pattern, binary, "\u2028")
+				runNoMatch(t, pattern, binary, "\u2029")
+			}
+		})
+	}
+}

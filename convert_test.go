@@ -290,3 +290,57 @@ func matchString(t *testing.T, pattern string, reExec string, toMatch string) st
 	//t.Logf("Result: %v", string(out))
 	return string(out)
 }
+
+func TestGeneratedRequiredLandmarkOverlaps(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, input, want string
+	}{
+		{`\S*([ac]{1,3})[a-c]\1`, "aaa", "aaa"},
+		{`\S*([a ]{1,3}\s+|x)a()`, " a a", " a a"},
+		{`\S*(abc|b)c()`, "abc", "abc"},
+		{`\S*(ab|[ac])b()`, "ab", "ab"},
+		{`\S*(\t|\s*b)c()`, " \tbc", ` \x09bc`},
+		{`\S*(\t|\s*b)c()`, " \t \tbc", ` \x09 \x09bc`},
+		{`\S*(\t|\s*b|\s*c)a()`, "aa ca", "aa ca"},
+		{`\S*\B(\t|\s*b)c()`, "  bc", "  bc"},
+		{`\S*\b(\t|\s*b)c()`, "a bc", "a bc"},
+		{`\S*(?m:^)(a|\s*b)c()`, "xx\n bc", " bc"},
+		{`\S*\G(a|\s*b)c()`, " bc", " bc"},
+		{`\S*(ab|[cd]{2147483646})z()`, "__abz", "__abz"},
+	} {
+		t.Run(tc.pattern+"/"+tc.input, func(t *testing.T) {
+			binary := generateAndCompile(t, tc.pattern, 0)
+			runMatch(t, tc.pattern, binary, tc.input, " 0: "+tc.want)
+		})
+	}
+}
+
+func TestGeneratedGreedyLoopWithSmallFollowingSet(t *testing.T) {
+	for _, pattern := range []string{`\S*([ac]{1,3})[a-c]\1`, `\S*([ace]{1,3})[a-c]\1`} {
+		binary := generateAndCompile(t, pattern, 0)
+		runMatch(t, pattern, binary, "ababa", " 0: ababa")
+	}
+}
+
+func TestGeneratedPrefixAnalysisPreservesMatches(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, input, want string
+	}{
+		{`(?:a[bc]){2}d`, "abacd", "abacd"},
+		{`(abc)|(ade)|(abf)`, "ade", "ade"},
+		{`(a😀x)|(a😁y)`, "a😁y", `a\xf0\x9f\x98\x81y`},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			binary := generateAndCompile(t, tc.pattern, 0)
+			runMatch(t, tc.pattern, binary, tc.input, " 0: "+tc.want)
+			runNoMatch(t, tc.pattern, binary, "xyz")
+		})
+	}
+}
+
+func TestGeneratedOverlappingLoopsPreserveBacktracking(t *testing.T) {
+	pattern := `^[ab]*([bc]*)c\1$`
+	binary := generateAndCompile(t, pattern, 0)
+	runMatch(t, pattern, binary, "bcb", " 0: bcb")
+	runMatch(t, pattern, binary, "bcb", " 1: b")
+}
