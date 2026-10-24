@@ -1328,6 +1328,13 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 	return false
 }
 
+func lineBreakExpression(options syntax.RegexOptions, chExpr string) string {
+	if options&syntax.ECMAScript != 0 {
+		return fmt.Sprintf("syntax.IsECMALineTerminator(%s)", chExpr)
+	}
+	return fmt.Sprintf("%s == '\\n'", chExpr)
+}
+
 func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 	switch node.T {
 	case syntax.NtBeginning, syntax.NtStart:
@@ -1347,9 +1354,9 @@ func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 
 	case syntax.NtBol:
 		if rm.sliceStaticPos > 0 {
-			c.writeLineFmt("if %s[%v-1] != '\\n' {", rm.sliceSpan, rm.sliceStaticPos)
+			c.writeLineFmt("if !(%s) {", lineBreakExpression(rm.Options, fmt.Sprintf("%s[%v-1]", rm.sliceSpan, rm.sliceStaticPos)))
 		} else {
-			c.writeLine("if pos > 0 && r.Runtext[pos-1] != '\\n' {")
+			c.writeLineFmt("if pos > 0 && !(%s) {", lineBreakExpression(rm.Options, "r.Runtext[pos-1]"))
 		}
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}")
@@ -1375,9 +1382,9 @@ func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 
 	case syntax.NtEol:
 		if rm.sliceStaticPos > 0 {
-			c.writeLineFmt("if %v < len(%s) && %[2]s[%[1]v] != '\\n' {", rm.sliceStaticPos, rm.sliceSpan)
+			c.writeLineFmt("if %v < len(%s) && !(%s) {", rm.sliceStaticPos, rm.sliceSpan, lineBreakExpression(rm.Options, fmt.Sprintf("%s[%v]", rm.sliceSpan, rm.sliceStaticPos)))
 		} else {
-			c.writeLine("if pos < len(r.Runtext) && r.Runtext[pos] != '\\n' {")
+			c.writeLineFmt("if pos < len(r.Runtext) && !(%s) {", lineBreakExpression(rm.Options, "r.Runtext[pos]"))
 		}
 		c.emitExecuteGoto(rm, rm.doneLabel)
 		c.writeLine("}")

@@ -262,10 +262,14 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 		// other anchors like Beginning, there are potentially multiple places a BOL can match.  So unlike
 		// the other anchors, which all skip all subsequent processing if found, with BOL we just use it
 		// to boost our position to the next line, and then continue normally with any searches.
+		newlineSearch := `helpers.IndexOfAny1(r.Runtext[pos:], '\n')`
+		if rm.Options&syntax.ECMAScript != 0 {
+			newlineSearch = "helpers.IndexFunc(r.Runtext[pos:], syntax.IsECMALineTerminator)"
+		}
 		c.writeLineFmt(`// The pattern has a leading beginning-of-line anchor.
-			if pos > 0 && r.Runtext[pos-1] != '\n' {
-				newlinePos := helpers.IndexOfAny1(r.Runtext[pos:], '\n')
-				if newlinePos > len(r.Runtext) - pos - 1 {
+			if pos > 0 && !(%s) {
+				newlinePos := %s
+				if newlinePos < 0 {
 					goto NoMatchFound
 				}
 				pos += newlinePos + 1
@@ -274,7 +278,7 @@ func (c *converter) emitAnchors(rm *regexpData) bool {
 					goto NoMatchFound
 				}
 			}
-			`, str1, str2)
+			`, lineBreakExpression(rm.Options, "r.Runtext[pos-1]"), newlineSearch, str1, str2)
 		rm.noMatchFoundLabelNeeded = true
 	}
 

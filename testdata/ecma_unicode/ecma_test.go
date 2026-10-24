@@ -1,12 +1,83 @@
 package ecmaharness
 
 import (
+	"fmt"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/dlclark/regexp2/v2"
 )
+
+func TestMultilineAnchors(t *testing.T) {
+	for _, tc := range []struct {
+		re    *regexp2.Regexp
+		input string
+		want  string
+		index int // -1 means no match.
+	}{
+		{regexp2.MustCompile(`^b`, regexp2.ECMAScript|regexp2.Multiline), "a\rb", "b", 2},
+		{regexp2.MustCompile(`^b`, regexp2.ECMAScript|regexp2.Unicode|regexp2.Multiline), "a\u2028b", "b", 2},
+		{regexp2.MustCompile(`^b`, regexp2.ECMAScript|regexp2.Multiline|regexp2.RightToLeft), "a\u2029b", "b", 2},
+		{regexp2.MustCompile(`a$`, regexp2.ECMAScript|regexp2.Multiline), "a\rb", "a", 0},
+		{regexp2.MustCompile(`a$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.Multiline), "a\u2028b", "a", 0},
+		{regexp2.MustCompile(`a$`, regexp2.ECMAScript|regexp2.Multiline|regexp2.RightToLeft), "a\u2029b", "a", 0},
+		{regexp2.MustCompile(`^$`, regexp2.ECMAScript|regexp2.Multiline), "a\r\r\nb", "", 2},
+		{regexp2.MustCompile(`^\d+$`, regexp2.ECMAScript|regexp2.Multiline), "x\r\n42\r\ny", "42", 3},
+		{regexp2.MustCompile(`^.+$`, regexp2.ECMAScript|regexp2.Multiline), "\u2028abc\u2029", "abc", 1},
+		{regexp2.MustCompile(`\r^b`, regexp2.ECMAScript|regexp2.Multiline), "a\rb", "\rb", 1},
+		{regexp2.MustCompile(`(?<=^)b`, regexp2.ECMAScript|regexp2.Multiline), "a\u2028b", "b", 2},
+		{regexp2.MustCompile(`b(?=$)`, regexp2.ECMAScript|regexp2.Multiline), "b\u2029", "b", 0},
+		{regexp2.MustCompile(`\S*^(a|\s*b)c`, regexp2.ECMAScript|regexp2.Multiline), "x\r bc", " bc", 2},
+		{regexp2.MustCompile(`\S*^(a|\s*b)c`, regexp2.ECMAScript|regexp2.Unicode|regexp2.Multiline), "x\u2028 bc", " bc", 2},
+		{regexp2.MustCompile(`\r*$`, regexp2.ECMAScript|regexp2.Multiline), "\r\rx", "\r", 0},
+		{regexp2.MustCompile(`[\r\u2028]*$`, regexp2.ECMAScript|regexp2.Multiline), "\r\u2028x", "\r", 0},
+		{regexp2.MustCompile(`^b|a$`, regexp2.Multiline), "a\rb", "", -1},
+		{regexp2.MustCompile(`^b|a$`, regexp2.RE2|regexp2.Multiline), "a\u2028b", "", -1},
+		{regexp2.MustCompile(`^b|a$`, regexp2.ECMAScript), "a\u2029b", "", -1},
+	} {
+		t.Run(fmt.Sprintf("%s/%q", tc.re.String(), tc.input), func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.input), tc.index >= 0)
+			m, err := tc.re.FindStringMatch(tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.index < 0 {
+				if m != nil {
+					t.Fatalf("got match %q, want no match", m.String())
+				}
+			} else if m == nil || m.String() != tc.want || m.RuneIndex != tc.index {
+				t.Fatalf("got match %v, want %q at rune %d", m, tc.want, tc.index)
+			}
+		})
+	}
+
+	// A failed candidate must advance to the next ECMAScript line start.
+	for _, re := range []*regexp2.Regexp{
+		regexp2.MustCompile(`^[bc]d`, regexp2.ECMAScript|regexp2.Multiline),
+		regexp2.MustCompile(`^[bc]d`, regexp2.ECMAScript|regexp2.Unicode|regexp2.Multiline),
+	} {
+		checkMatch(t, re, []rune("bxcd"), false)
+		for _, separator := range []string{"\n", "\r", "\u2028", "\u2029", "\r\n"} {
+			input := "bx" + separator + "cd"
+			checkMatch(t, re, []rune(input), true)
+			m, err := re.FindStringMatch(input)
+			if err != nil || m == nil || m.String() != "cd" || m.RuneIndex != 2+len([]rune(separator)) {
+				t.Errorf("/%s/ on %q: got %v, %v; want cd after separator", re.String(), input, m, err)
+			}
+		}
+	}
+}
+
+func TestUnicodeControlEscapes(t *testing.T) {
+	for _, re := range []*regexp2.Regexp{
+		regexp2.MustCompile(`^\cA$`, regexp2.ECMAScript|regexp2.Unicode),
+		regexp2.MustCompile(`^[\cA]$`, regexp2.ECMAScript|regexp2.Unicode),
+	} {
+		checkMatch(t, re, []rune{1}, true)
+		checkMatch(t, re, []rune("cA"), false)
+	}
+}
 
 func TestQuantifiedCaptures(t *testing.T) {
 	// ECMAScript RepeatMatcher clears captures before each repetition and

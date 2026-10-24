@@ -32,7 +32,7 @@ func TestGeneratedECMAUnicode(t *testing.T) {
 		t.Fatalf("generate ECMAScript engines: %v\n%s", err, out)
 	}
 	// Run each regression separately so a panic does not mask other failures.
-	for _, name := range []string{"TestPropertyLoopBounds", "TestPropertyRangeBounds", "TestPropertyASCIIBoundary", "TestSurrogateProperty", "TestPropertyComposition", "TestEscapedGroupNames", "TestLegacyECMALookaheadQuantifier", "TestDuplicateNamesBoolean", "TestQuantifiedCaptures"} {
+	for _, name := range []string{"TestPropertyLoopBounds", "TestPropertyRangeBounds", "TestPropertyASCIIBoundary", "TestSurrogateProperty", "TestPropertyComposition", "TestEscapedGroupNames", "TestLegacyECMALookaheadQuantifier", "TestDuplicateNamesBoolean", "TestQuantifiedCaptures", "TestMultilineAnchors", "TestUnicodeControlEscapes"} {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command("go", "test", "-run", "^"+name+"$", ".")
 			cmd.Dir = dir
@@ -60,6 +60,11 @@ func TestECMAUnicodeCompileErrors(t *testing.T) {
 		{`\p{script=Greek}`, syntax.ECMAScript | syntax.Unicode, "unknown unicode category"},
 		{`\p{ASCII=Yes}`, syntax.ECMAScript | syntax.Unicode, "unknown unicode category"},
 		{`[\p{ASCII}-a]`, syntax.ECMAScript | syntax.Unicode, "cannot create range"},
+		{`\c`, syntax.ECMAScript | syntax.Unicode, "missing control character"},
+		{`\c0`, syntax.ECMAScript | syntax.Unicode, "unrecognized control character"},
+		{`[\c_]`, syntax.ECMAScript | syntax.Unicode, "unrecognized control character"},
+		{`\xZ`, syntax.ECMAScript | syntax.Unicode, "insufficient hexadecimal digits"},
+		{`\u12`, syntax.ECMAScript | syntax.Unicode, "insufficient hexadecimal digits"},
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			out, err := exec.Command(binary, "-expr", tc.pattern, "-opt", strconv.Itoa(int(tc.options))).CombinedOutput()
