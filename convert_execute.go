@@ -414,7 +414,24 @@ func (c *converter) emitExecuteConcatenation(rm *regexpData, node *syntax.RegexN
 						if rm.sliceStaticPos > 0 {
 							sourceSpan = fmt.Sprintf("%s[%v:]", rm.sliceSpan, rm.sliceStaticPos)
 						}
-						c.write(fmt.Sprintf("!helpers.StartsWithIgnoreCase(%s, %s)", sourceSpan, getRuneSliceLiteral(strings.ToLower(caseInsensitiveString))))
+						// These nodes describe exact ASCII sets, so Unicode folding
+						// must not introduce extra characters such as Kelvin sign.
+						c.requiredHelpers["regexp2cgStartsWithIgnoreCaseASCII"] = `func regexp2cgStartsWithIgnoreCaseASCII(input, prefix []rune) bool {
+								if len(input) < len(prefix) {
+									return false
+								}
+								for i, want := range prefix {
+									ch := input[i]
+									if ch >= 'A' && ch <= 'Z' {
+										ch += 'a' - 'A'
+									}
+									if ch != want {
+										return false
+									}
+								}
+								return true
+							}`
+						c.write(fmt.Sprintf("!regexp2cgStartsWithIgnoreCaseASCII(%s, %s)", sourceSpan, getRuneSliceLiteral(strings.ToLower(caseInsensitiveString))))
 						desc := fmt.Sprintf("Match the string %#v (case-insensitive)", caseInsensitiveString)
 						prevDescription = &desc
 						wroteClauses = true
@@ -1394,22 +1411,26 @@ func (c *converter) emitExecuteAnchors(rm *regexpData, node *syntax.RegexNode) {
 // Emits the code to handle a boundary check on a character.
 func (c *converter) emitExecuteBoundary(rm *regexpData, node *syntax.RegexNode) {
 	var call string
+	var options string
 	switch node.T {
 	case syntax.NtBoundary:
 		call = "!r.IsBoundary"
 	case syntax.NtNonboundary:
 		call = "r.IsBoundary"
 	case syntax.NtECMABoundary:
-		call = "!r.IsECMABoundary"
+		call = "!r.IsECMABoundaryWithOptions"
 	case syntax.NtNonECMABoundary:
-		call = "r.IsECMABoundary"
+		call = "r.IsECMABoundaryWithOptions"
+	}
+	if node.T == syntax.NtECMABoundary || node.T == syntax.NtNonECMABoundary {
+		options = ", " + getOptString(node.Options&(syntax.IgnoreCase|syntax.Unicode))
 	}
 
 	end := ""
 	if rm.sliceStaticPos > 0 {
 		end = fmt.Sprint(" + ", rm.sliceStaticPos)
 	}
-	c.writeLineFmt("if %s(pos%s) {", call, end)
+	c.writeLineFmt("if %s(pos%s%s) {", call, end, options)
 	c.emitExecuteGoto(rm, rm.doneLabel)
 	c.writeLineFmt("}")
 }
@@ -2467,24 +2488,49 @@ func (c *converter) emitBackrefWhenHasCapture(rm *regexpData, node *syntax.Regex
 	rm.addLocalDec("matchLength := 0")
 	c.writeLineFmt("matchLength = r.MatchLength(%v)", capnum)
 
-	ignoreCase := ""
-	if node.Options&syntax.IgnoreCase != 0 {
-		ignoreCase = "IgnoreCase"
-	}
-
 	// Validate that the remaining length of the slice is sufficient
 	// to possibly match, and then do a SequenceEqual against the matched text.
-	if (node.Options & syntax.RightToLeft) == 0 {
-		c.writeLineFmt("if len(%s) < matchLength || !helpers.Equals%s(r.Runtext, r.MatchIndex(%v), matchLength, %[1]s[:matchLength]) {",
-			rm.sliceSpan, ignoreCase, capnum)
-		c.emitExecuteGoto(rm, rm.doneLabel)
-		c.writeLine("}\npos += matchLength")
-	} else {
-		c.writeLineFmt("if pos < matchLength || !helpers.Equals%s(r.Runtext, r.MatchIndex(%v), matchLength, r.Runtext[pos-matchLength:pos]) {",
-			ignoreCase, capnum)
-		c.emitExecuteGoto(rm, rm.doneLabel)
-		c.writeLine("}\npos -= matchLength")
+	available := fmt.Sprintf("len(%s)", rm.sliceSpan)
+	matchSpan := fmt.Sprintf("%s[:matchLength]", rm.sliceSpan)
+	advance := "+="
+	if node.Options&syntax.RightToLeft != 0 {
+		available = "pos"
+		matchSpan = "r.Runtext[pos-matchLength:pos]"
+		advance = "-="
 	}
+	comparison := fmt.Sprintf("helpers.Equals(r.Runtext, r.MatchIndex(%d), matchLength, %s)", capnum, matchSpan)
+	if node.Options&syntax.IgnoreCase != 0 {
+		c.requiredHelpers["regexp2cgEqualsIgnoreCase"] = `func regexp2cgEqualsIgnoreCase(input []rune, start int, other []rune, options syntax.RegexOptions) bool {
+			// Exact matches can use the vectorized rune-slice comparison.
+			if helpers.Equals(input, start, len(other), other) {
+				return true
+			}
+			for i, ch := range other {
+				captured := input[start+i]
+				if captured == ch {
+					continue
+				}
+				// ASCII letters fold the same in every mode. Both operands
+				// must be ASCII; Unicode-to-ASCII folding depends on options.
+				if uint32(captured|ch) < utf8.RuneSelf {
+					folded := captured | 0x20
+					if folded < 'a' || folded > 'z' || folded != ch|0x20 {
+						return false
+					}
+					continue
+				}
+				if !syntax.IsCaseEquivalent(captured, ch, options) {
+					return false
+				}
+			}
+			return true
+		}`
+		comparison = fmt.Sprintf("regexp2cgEqualsIgnoreCase(r.Runtext, r.MatchIndex(%d), %s, syntax.RegexOptions(%d))",
+			capnum, matchSpan, node.Options&(syntax.ECMAScript|syntax.Unicode))
+	}
+	c.writeLineFmt("if %s < matchLength || !%s {", available, comparison)
+	c.emitExecuteGoto(rm, rm.doneLabel)
+	c.writeLineFmt("}\npos %s matchLength", advance)
 	c.sliceInputSpan(rm, false)
 }
 

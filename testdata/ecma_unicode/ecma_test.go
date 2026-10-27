@@ -79,6 +79,172 @@ func TestUnicodeControlEscapes(t *testing.T) {
 	}
 }
 
+func TestECMAWordBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		re    *regexp2.Regexp
+		input string
+		want  bool
+	}{
+		{regexp2.MustCompile(`\b`, regexp2.ECMAScript), "é", false},
+		{regexp2.MustCompile(`\B`, regexp2.ECMAScript), "é", true},
+		{regexp2.MustCompile(`\b`, regexp2.ECMAScript|regexp2.Unicode), "K", false},
+		{regexp2.MustCompile(`\b`, regexp2.ECMAScript|regexp2.IgnoreCase), "ſ", false},
+		{regexp2.MustCompile(`\b`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "K", true},
+		{regexp2.MustCompile(`\b`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "é", false},
+		{regexp2.MustCompile(`(?i:\b)`, regexp2.ECMAScript|regexp2.Unicode), "K", true},
+		{regexp2.MustCompile(`(?iu:\B)`, regexp2.ECMAScript), "ſ", false},
+		{regexp2.MustCompile(`(?-i:\b)`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "K", false},
+		{regexp2.MustCompile(`(?-u:\b)`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "ſ", false},
+		{regexp2.MustCompile(`\b`, regexp2.ECMAScript|regexp2.RightToLeft), "é", false},
+		{regexp2.MustCompile(`a+\b`, regexp2.ECMAScript), "aaé", true},
+		{regexp2.MustCompile(`\b`), "é", true},
+	} {
+		t.Run(fmt.Sprintf("%s/%q", tc.re.String(), tc.input), func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.input), tc.want)
+		})
+	}
+}
+
+func TestBackreferenceCaseFolding(t *testing.T) {
+	for _, tc := range []struct {
+		re    *regexp2.Regexp
+		input string
+		want  bool
+	}{
+		{regexp2.MustCompile(`^(s)\1$`, regexp2.IgnoreCase), "sſ", true},
+		{regexp2.MustCompile(`^(Σ)\1$`, regexp2.IgnoreCase), "Σς", true},
+		{regexp2.MustCompile(`^(s)\1$`, regexp2.RE2|regexp2.IgnoreCase), "sſ", true},
+		{regexp2.MustCompile(`^(k)\1$`, regexp2.ECMAScript|regexp2.IgnoreCase), "kK", false},
+		{regexp2.MustCompile(`^(Σ)\1$`, regexp2.ECMAScript|regexp2.IgnoreCase), "Σς", true},
+		{regexp2.MustCompile(`^(k)\1$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "kK", true},
+		{regexp2.MustCompile(`^\1(s)$`, regexp2.IgnoreCase|regexp2.RightToLeft), "ſs", true},
+		{regexp2.MustCompile(`^\1(k)$`, regexp2.ECMAScript|regexp2.IgnoreCase|regexp2.RightToLeft), "Kk", false},
+		{regexp2.MustCompile(`^(s)(?i:\1)$`), "sſ", true},
+		{regexp2.MustCompile(`^(?i:(s))\1$`), "sſ", false},
+		{regexp2.MustCompile(`^(s)(?-i:\1)$`, regexp2.IgnoreCase), "sſ", false},
+		{regexp2.MustCompile(`^(a*)\1$`, regexp2.IgnoreCase), "", true},
+		{regexp2.MustCompile(`^(s)\1+$`, regexp2.IgnoreCase), "sſS", true},
+		{regexp2.MustCompile(`^(.+?)\1$`, regexp2.IgnoreCase), "sΣſς", true},
+	} {
+		t.Run(fmt.Sprintf("%s/%q", tc.re.String(), tc.input), func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.input), tc.want)
+		})
+	}
+}
+
+func TestBackreferenceFastPaths(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		re     *regexp2.Regexp
+		legacy bool
+	}{
+		{"default", regexp2.MustCompile(`^([\s\S]*)#\1$`, regexp2.IgnoreCase), false},
+		{"legacy", regexp2.MustCompile(`^([\s\S]*)#\1$`, regexp2.ECMAScript|regexp2.IgnoreCase), true},
+		{"unicode", regexp2.MustCompile(`^([\s\S]*)#\1$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), false},
+		{"right to left", regexp2.MustCompile(`^\1#([\s\S]*)$`, regexp2.IgnoreCase|regexp2.RightToLeft), false},
+		{"legacy right to left", regexp2.MustCompile(`^\1#([\s\S]*)$`, regexp2.ECMAScript|regexp2.IgnoreCase|regexp2.RightToLeft), true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				left, right string
+				want        bool
+				unicodeOnly bool
+			}{
+				{"", "", true, false},
+				{"aZ09_@", "aZ09_@", true, false},
+				{"aZ09_@", "Az09_@", true, false},
+				{"A[", "a{", false, false},
+				{"@", "`", false, false},
+				{"9", "8", false, false},
+				{"Σé𐐀", "Σé𐐀", true, false},
+				{"Σ", "ς", true, false},
+				{"s", "ſ", true, true},
+				{"k", "K", true, true},
+				{"i", "İ", false, false},
+				{"I", "ı", false, false},
+				{"ß", "ẞ", true, true},
+				{"𐐀", "𐐨", true, true},
+				{"ß", "ss", false, false},
+				{"AbΣs!", "aBςſ!", true, true},
+				{"AbΣ!", "aBς?", false, false},
+			} {
+				want := tc.want && !(mode.legacy && tc.unicodeOnly)
+				// Exercise both ASCII/non-ASCII operand orders and mixed prefixes.
+				for _, input := range []string{tc.left + "#" + tc.right, tc.right + "#" + tc.left} {
+					checkMatch(t, mode.re, []rune(input), want)
+				}
+			}
+		})
+	}
+}
+
+func TestOrdinalASCIIComparisons(t *testing.T) {
+	// Combining ASCII sets into one comparison must not admit non-ASCII folds.
+	for _, tc := range []struct {
+		re      *regexp2.Regexp
+		yes, no string
+	}{
+		{regexp2.MustCompile(`^ak$`, regexp2.ECMAScript|regexp2.IgnoreCase), "AK", "aK"},
+		{regexp2.MustCompile(`^(?i:ak)$`, regexp2.ECMAScript), "AK", "aK"},
+		{regexp2.MustCompile(`^1ak$`, regexp2.ECMAScript|regexp2.IgnoreCase), "1AK", "1aK"},
+		{regexp2.MustCompile(`^[Aa][Kk]$`), "Ak", "aK"},
+		{regexp2.MustCompile(`^ai$`, regexp2.IgnoreCase), "AI", "aİ"},
+	} {
+		t.Run(tc.re.String(), func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.yes), true)
+			checkMatch(t, tc.re, []rune(tc.no), false)
+		})
+	}
+}
+
+func TestUnicodeSurrogatePairs(t *testing.T) {
+	for _, tc := range []struct {
+		re      *regexp2.Regexp
+		yes, no string
+	}{
+		{regexp2.MustCompile(`^\uD83D\uDE00{2}$`, regexp2.ECMAScript|regexp2.Unicode), "😀😀", "😀"},
+		{regexp2.MustCompile(`^[\uD83D\uDE00-\uD83D\uDE01]$`, regexp2.ECMAScript|regexp2.Unicode), "😁", "😂"},
+		{regexp2.MustCompile(`(?<=\uD83D\uDE00)a`, regexp2.ECMAScript|regexp2.Unicode), "😀a", "😁a"},
+		{regexp2.MustCompile(`^(\uD83D\uDE00)\1$`, regexp2.ECMAScript|regexp2.Unicode), "😀😀", "😀😁"},
+	} {
+		t.Run(tc.re.String(), func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.yes), true)
+			checkMatch(t, tc.re, []rune(tc.no), false)
+		})
+	}
+}
+
+func TestBorrowedMatchCaptures(t *testing.T) {
+	re := regexp2.MustCompile(`(?<5>a)?b`)
+	input := []rune("ab b")
+	calls := 0
+	err := re.FindRunesMatches(input, -1, func(view regexp2.MatchView) bool {
+		if view.GroupCount() != 2 {
+			t.Errorf("GroupCount = %d, want 2", view.GroupCount())
+		}
+		index, length, ok := view.GroupRange(5)
+		if calls == 0 {
+			if !ok || index != 0 || length != 1 {
+				t.Errorf("first group 5 = (%d, %d, %v), want (0, 1, true)", index, length, ok)
+			}
+		} else if ok {
+			t.Error("second match retained the first match's optional capture")
+		}
+		calls++
+		return true
+	})
+	if err != nil || calls != 2 {
+		t.Fatalf("iteration: calls = %d, err = %v; want 2, nil", calls, err)
+	}
+	m, err := re.FindRunesMatch(input)
+	if err != nil || m == nil {
+		t.Fatalf("FindRunesMatch = %v, %v; want a match", m, err)
+	}
+	if name := m.GroupByNumber(5).Name; name != "5" {
+		t.Errorf("sparse group name = %q, want 5", name)
+	}
+}
+
 func TestQuantifiedCaptures(t *testing.T) {
 	// ECMAScript RepeatMatcher clears captures before each repetition and
 	// rejects optional empty iterations. Check both full and quick executors.
@@ -217,7 +383,8 @@ func TestPropertyComposition(t *testing.T) {
 		{regexp2.MustCompile(`^[\p{Ll}\p{Emoji}]+$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "AΣ😀", "AΣ!"},
 		// /u complements the property before folding. Negating the whole class
 		// after folding has different behavior.
-		{regexp2.MustCompile(`^\P{Lowercase_Letter}$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "a", "İ"},
+		{regexp2.MustCompile(`^\P{Lowercase_Letter}$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "a", "ı"},
+		{regexp2.MustCompile(`^\P{Lowercase_Letter}$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "İ", "ı"},
 		{regexp2.MustCompile(`^[^\p{Lowercase_Letter}]$`, regexp2.ECMAScript|regexp2.Unicode|regexp2.IgnoreCase), "!", "a"},
 	} {
 		t.Run(tc.re.String(), func(t *testing.T) {
