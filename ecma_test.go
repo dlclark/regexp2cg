@@ -32,7 +32,7 @@ func TestGeneratedECMAUnicode(t *testing.T) {
 		t.Fatalf("generate ECMAScript engines: %v\n%s", err, out)
 	}
 	// Run each regression separately so a panic does not mask other failures.
-	for _, name := range []string{"TestPropertyLoopBounds", "TestPropertyRangeBounds", "TestPropertyASCIIBoundary", "TestSurrogateProperty", "TestPropertyComposition", "TestEscapedGroupNames", "TestLegacyECMALookaheadQuantifier", "TestDuplicateNamesBoolean", "TestQuantifiedCaptures", "TestMultilineAnchors", "TestUnicodeControlEscapes", "TestECMAWordBoundaries", "TestBackreferenceCaseFolding", "TestBackreferenceFastPaths", "TestOrdinalASCIIComparisons", "TestUnicodeSurrogatePairs", "TestBorrowedMatchCaptures"} {
+	for _, name := range []string{"TestPropertyLoopBounds", "TestPropertyRangeBounds", "TestPropertyASCIIBoundary", "TestSurrogateProperty", "TestPropertyComposition", "TestEscapedGroupNames", "TestLegacyECMALookaheadQuantifier", "TestDuplicateNamesBoolean", "TestQuantifiedCaptures", "TestMultilineAnchors", "TestUnicodeControlEscapes", "TestDecimalEscapes", "TestECMAWordBoundaries", "TestBackreferenceCaseFolding", "TestBackreferenceFastPaths", "TestOrdinalASCIIComparisons", "TestUnicodeSurrogatePairs", "TestBorrowedMatchCaptures"} {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command("go", "test", "-run", "^"+name+"$", ".")
 			cmd.Dir = dir
@@ -65,6 +65,13 @@ func TestECMAUnicodeCompileErrors(t *testing.T) {
 		{`[\c_]`, syntax.ECMAScript | syntax.Unicode, "unrecognized control character"},
 		{`\xZ`, syntax.ECMAScript | syntax.Unicode, "insufficient hexadecimal digits"},
 		{`\u12`, syntax.ECMAScript | syntax.Unicode, "insufficient hexadecimal digits"},
+		{`\1`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
+		{`(a)\2`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
+		{`\8`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
+		{`\01`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
+		{`\08`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
+		{`(a)[\1]`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
+		{`[\01]`, syntax.ECMAScript | syntax.Unicode, "unrecognized escape"},
 	} {
 		t.Run(tc.pattern, func(t *testing.T) {
 			out, err := exec.Command(binary, "-expr", tc.pattern, "-opt", strconv.Itoa(int(tc.options))).CombinedOutput()

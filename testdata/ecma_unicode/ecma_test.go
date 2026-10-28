@@ -9,6 +9,28 @@ import (
 	"github.com/dlclark/regexp2/v2"
 )
 
+func TestDecimalEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		re          *regexp2.Regexp
+		match, miss string
+	}{
+		{regexp2.MustCompile(`^\0$`, regexp2.ECMAScript|regexp2.Unicode), "\x00", "0"},
+		{regexp2.MustCompile(`^[\0]$`, regexp2.ECMAScript|regexp2.Unicode), "\x00", "0"},
+		{regexp2.MustCompile(`^(a)\1$`, regexp2.ECMAScript|regexp2.Unicode), "aa", "a1"},
+		{regexp2.MustCompile(`^(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\10$`, regexp2.ECMAScript|regexp2.Unicode), "abcdefghijj", "abcdefghija0"},
+		{regexp2.MustCompile(`^\10(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)$`, regexp2.ECMAScript|regexp2.Unicode), "abcdefghij", "\babcdefghij"},
+		{regexp2.MustCompile(`^\01$`, regexp2.ECMAScript), "\x01", "01"},
+		{regexp2.MustCompile(`^[\8]$`, regexp2.ECMAScript), "8", "\b"},
+		{regexp2.MustCompile(`^\01$`, regexp2.Unicode), "\x01", "01"},
+	} {
+		t.Run(tc.re.String()+"/"+tc.match, func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.match), true)
+			checkMatch(t, tc.re, []rune(tc.miss), false)
+			checkMatch(t, tc.re, nil, false)
+		})
+	}
+}
+
 func TestMultilineAnchors(t *testing.T) {
 	for _, tc := range []struct {
 		re    *regexp2.Regexp

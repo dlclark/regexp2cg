@@ -502,7 +502,7 @@ func (c *converter) emitIndexOfString_RightToLeft(rm *regexpData) {
 		r.Runtextpos = pos + %[2]v
 		return true
 	}
-	`, prefix, len(prefix))
+	`, prefix, len([]rune(prefix)))
 }
 
 func getRuneSliceSliceLiteral(vals []string) string {
