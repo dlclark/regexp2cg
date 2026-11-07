@@ -344,3 +344,13 @@ func TestGeneratedOverlappingLoopsPreserveBacktracking(t *testing.T) {
 	runMatch(t, pattern, binary, "bcb", " 0: bcb")
 	runMatch(t, pattern, binary, "bcb", " 1: b")
 }
+
+func TestGeneratedGreedyLoopBeforeNegatedRange(t *testing.T) {
+	pattern := `\A.*[^a-d]x`
+	binary := generateAndCompile(t, pattern, 0)
+	runMatch(t, pattern, binary, "a!x", " 0: a!x")
+	runMatch(t, pattern, binary, "a!xb?x", " 0: a!xb?x")
+	runMatch(t, pattern, binary, "a!xbcx", " 0: a!x")
+	runMatch(t, pattern, binary, "aéx", ` 0: a\xc3\xa9x`)
+	runNoMatch(t, pattern, binary, "abcdx")
+}

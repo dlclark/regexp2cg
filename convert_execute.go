@@ -1307,7 +1307,16 @@ func (c *converter) tryEmitExecuteIndexOf(rm *regexpData, node *syntax.RegexNode
 		// Prefer IndexOfAnyInRange over IndexOfAny, except for tiny ranges (1 or 2 items) that IndexOfAny handles more efficiently
 		if rs := node.Set.GetIfNRanges(1); len(rs) == 1 && rs[0].Last-rs[0].First > 1 {
 			var expr string
-			if negate {
+			if useLast && negate {
+				// regexp2 has no reverse helper for the complement of a range.
+				c.requiredHelpers["regexp2cgLastIndexOfAnyExceptInRange"] = `func regexp2cgLastIndexOfAnyExceptInRange(chars []rune, first, last rune) int {
+	for i := len(chars)-1; i >= 0; i-- {
+		if chars[i] < first || chars[i] > last { return i }
+	}
+	return -1
+}`
+				expr = fmt.Sprintf("regexp2cgLastIndexOfAnyExceptInRange(%s, %s, %s)", spanName, getGoLiteral(rs[0].First), getGoLiteral(rs[0].Last))
+			} else if negate {
 				expr = fmt.Sprintf("helpers.%sIndexOfAnyExceptInRange(%s, %s, %s)", last, spanName, getGoLiteral(rs[0].First), getGoLiteral(rs[0].Last))
 			} else {
 				expr = fmt.Sprintf("helpers.%sIndexOfAnyInRange(%s, %s, %s)", last, spanName, getGoLiteral(rs[0].First), getGoLiteral(rs[0].Last))
