@@ -186,6 +186,13 @@ func TestGeneratedNegatedClassIsNotLeadingStrings(t *testing.T) {
 	runNoMatch(t, `a[^bc]d`, exec, "abd")
 }
 
+func TestGeneratedUnionOfNegatedUnicodeCategories(t *testing.T) {
+	pattern := `[\P{L}\P{Lu}]`
+	binary := generateAndCompile(t, pattern, 0)
+	runMatch(t, pattern, binary, "a", " 0: a")
+	runNoMatch(t, pattern, binary, "A")
+}
+
 func TestGeneratedLeftContextMetadata(t *testing.T) {
 	tests := []struct {
 		pattern string
