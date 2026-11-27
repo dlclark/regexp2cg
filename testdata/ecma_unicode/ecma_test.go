@@ -31,6 +31,30 @@ func TestDecimalEscapes(t *testing.T) {
 	}
 }
 
+func TestECMAUnicodeIdentityEscapes(t *testing.T) {
+	for _, tc := range []struct {
+		re          *regexp2.Regexp
+		match, miss string
+	}{
+		{regexp2.MustCompile(`^\^\$\\\.\*\+\?\(\)\[\]\{\}\|\/$`, regexp2.ECMAScript|regexp2.Unicode), `^$\.*+?()[]{}|/`, "a"},
+		{regexp2.MustCompile(`^[\^\$\\\.\*\+\?\(\)\[\]\{\}\|\/\-]+$`, regexp2.ECMAScript|regexp2.Unicode), `^$\.*+?()[]{}|/-`, "a"},
+		{regexp2.MustCompile(`^[a\-z]+$`, regexp2.ECMAScript|regexp2.Unicode), "a-z", "b"},
+		{regexp2.MustCompile(`^\x23\x20$`, regexp2.ECMAScript|regexp2.Unicode), "# ", "ab"},
+		{regexp2.MustCompile(`\Afoo`, regexp2.ECMAScript|regexp2.Unicode), "foo", "xfoo"},
+		{regexp2.MustCompile(`\Gfoo`, regexp2.ECMAScript|regexp2.Unicode), "foo", "xfoo"},
+		{regexp2.MustCompile(`foo\Z`, regexp2.ECMAScript|regexp2.Unicode), "foo", "foox"},
+		{regexp2.MustCompile(`foo\z`, regexp2.ECMAScript|regexp2.Unicode), "foo", "foo\n"},
+		{regexp2.MustCompile(`^\x{2}$`, regexp2.ECMAScript), "xx", "x{2}"},
+		{regexp2.MustCompile(`^[\x{]$`, regexp2.ECMAScript), "{", "a"},
+		{regexp2.MustCompile(`^\#\ \-\_$`, regexp2.ECMAScript), "# -_", "x"},
+	} {
+		t.Run(tc.re.String()+"/"+tc.match, func(t *testing.T) {
+			checkMatch(t, tc.re, []rune(tc.match), true)
+			checkMatch(t, tc.re, []rune(tc.miss), false)
+		})
+	}
+}
+
 func TestMultilineAnchors(t *testing.T) {
 	for _, tc := range []struct {
 		re    *regexp2.Regexp
